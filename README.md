@@ -100,6 +100,12 @@ Push this repo to GitHub, add the repository secret `OPENAI_API_KEY`
 Redis + publisher + app, runs `verify_step3.py` (`run`), then the pod-delete restart test
 (`start` > delete pod > `resume`). Download the `step3-kind-reports` artifact for the pass reports.
 
+CLI equivalent: `gh workflow run step3-kind`, then `gh run watch`, then
+`gh run download <run-id> -n step3-kind-reports` (save as `step3/verify_output_step3_kind_*.txt`).
+Verified green on GitHub Actions: pods 2/2, `run` and restart test ALL CHECKS PASSED, Dapr keys in Redis,
+stories published on attempt 8. `step3/requirements.txt` pins `mcp<2` and `litellm==1.105.0`
+(newer releases break the image: `FastMCP` removed in mcp 2.x, litellm 1.106 needs mcp 2.x).
+
 ## Stop everything
 
 ```powershell
