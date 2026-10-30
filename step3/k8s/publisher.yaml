@@ -1,0 +1,38 @@
+# The flaky publisher MCP server. It needs no Dapr sidecar: the app calls it
+# over plain HTTP, and Dapr's retries happen on the calling side.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: publisher
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: publisher }
+  template:
+    metadata:
+      labels: { app: publisher }
+    spec:
+      containers:
+        - name: publisher
+          image: story-agent:dev
+          imagePullPolicy: Never          # image is loaded into Kind, not pulled
+          command: ["python", "mcp_server/publisher.py"]
+          env:
+            - { name: MCP_HOST, value: "0.0.0.0" }
+            - { name: MCP_PORT, value: "8765" }
+            - { name: MCP_FAIL_TIMES, value: "7" }
+            - { name: MCP_STATE_FILE, value: /data/attempts.json }
+            - { name: PUBLISH_DIR, value: /data/published }
+          ports: [{ containerPort: 8765 }]
+          volumeMounts: [{ name: data, mountPath: /data }]
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: publisher
+spec:
+  selector: { app: publisher }
+  ports: [{ port: 8765 }]

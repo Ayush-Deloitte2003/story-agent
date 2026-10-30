@@ -1,0 +1,102 @@
+"""The Dapr workflow that makes the story pipeline durable.
+
+    write_story (activity: deep agent + LLM)
+        -> wait for the "approval" event, or the approval timer, whichever first
+             reject  -> write_story again with the feedback
+             timeout -> end as "expired"
+             approve -> publish_story (activity: MCP tool, retried by Dapr)
+
+Dapr records every step in its state store. If the app stops while a story is
+waiting for approval, the workflow picks up where it was when the app comes
+back, and the approval timer keeps counting in the meantime.
+"""
+
+import json
+import logging
+import os
+from datetime import timedelta
+
+import dapr.ext.workflow as wf
+
+from app.agent import draft_story, publish_via_mcp
+
+log = logging.getLogger("story-agent")
+
+APPROVAL_EVENT = "approval"
+
+# Writing calls an LLM, which can hit transient errors too.
+WRITE_RETRY = wf.RetryPolicy(
+    first_retry_interval=timedelta(seconds=2),
+    max_number_of_attempts=3,
+    backoff_coefficient=2.0,
+)
+
+# Publishing calls the flaky MCP tool: keep trying, with growing gaps.
+PUBLISH_RETRY = wf.RetryPolicy(
+    first_retry_interval=timedelta(seconds=float(os.getenv("PUBLISH_RETRY_INTERVAL_SECONDS", "1"))),
+    max_number_of_attempts=int(os.getenv("PUBLISH_MAX_ATTEMPTS", "10")),
+    backoff_coefficient=float(os.getenv("PUBLISH_RETRY_BACKOFF", "1.5")),
+    max_retry_interval=timedelta(seconds=float(os.getenv("PUBLISH_MAX_RETRY_INTERVAL_SECONDS", "10"))),
+)
+
+runtime = wf.WorkflowRuntime()
+
+
+def _status(ctx: wf.DaprWorkflowContext, stage: str, **fields) -> None:
+    ctx.set_custom_status(json.dumps({"stage": stage, **fields}))
+
+
+@runtime.workflow(name="story_workflow")
+def story_workflow(ctx: wf.DaprWorkflowContext, inp: dict):
+    request = inp["message"]
+    timeout = timedelta(seconds=inp["approval_timeout_seconds"])
+    revisions: list[dict] = []
+
+    while True:
+        _status(ctx, "writing", revision=len(revisions))
+        draft = yield ctx.call_activity(
+            write_story, input={"request": request, "revisions": revisions}, retry_policy=WRITE_RETRY
+        )
+
+        expires_at = ctx.current_utc_datetime + timeout
+        _status(ctx, "awaiting_approval", story=draft, revision=len(revisions),
+                approval_expires_at=expires_at.isoformat())
+
+        approval = ctx.wait_for_external_event(APPROVAL_EVENT)
+        timer = ctx.create_timer(expires_at)
+        winner = yield wf.when_any([approval, timer])
+
+        if winner == timer:
+            _status(ctx, "expired", story=draft)
+            return {"status": "expired", "story": draft}
+
+        decision = approval.get_result() or {}
+        if decision.get("decision") == "reject":
+            revisions.append({"draft": draft, "feedback": decision.get("feedback") or "Rejected by reviewer."})
+            continue
+
+        _status(ctx, "publishing", story=draft)
+        try:
+            result = yield ctx.call_activity(publish_story, input=draft, retry_policy=PUBLISH_RETRY)
+        except wf.TaskFailedError as exc:
+            _status(ctx, "failed", story=draft)
+            return {"status": "failed", "story": draft, "error": str(exc)}
+        _status(ctx, "published", story=draft)
+        return {"status": "published", "story": draft, "result": result}
+
+
+@runtime.activity(name="write_story")
+async def write_story(ctx: wf.WorkflowActivityContext, inp: dict) -> dict:
+    log.info("write_story (revision %d)", len(inp["revisions"]))
+    return await draft_story(inp["request"], inp["revisions"])
+
+
+@runtime.activity(name="publish_story")
+async def publish_story(ctx: wf.WorkflowActivityContext, draft: dict) -> str:
+    try:
+        result = await publish_via_mcp(draft["title"], draft["story"])
+    except Exception as exc:
+        log.warning("publish_story failed, Dapr will retry: %s", exc)
+        raise
+    log.info("publish_story succeeded: %s", result)
+    return result

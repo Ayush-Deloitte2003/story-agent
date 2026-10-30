@@ -1,0 +1,7 @@
+deepagents>=0.7
+langchain-litellm>=0.11
+langchain-mcp-adapters>=0.3
+mcp>=1.30
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-dotenv>=1.0

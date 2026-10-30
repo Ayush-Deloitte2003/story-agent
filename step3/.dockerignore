@@ -1,0 +1,9 @@
+.venv
+.env
+published
+dapr/state.db*
+**/__pycache__
+verify_output_*.txt
+.step3_pending.json
+mcp_server/attempts.json
+k8s

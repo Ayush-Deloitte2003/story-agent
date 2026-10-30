@@ -1,0 +1,14 @@
+# Local (self-hosted) state store for Dapr workflows: a SQLite file, so no
+# Redis or Docker is needed for `dapr run`. Kubernetes uses k8s/statestore.yaml.
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+spec:
+  type: state.sqlite
+  version: v1
+  metadata:
+    - name: connectionString
+      value: "dapr/state.db"
+    - name: actorStateStore
+      value: "true"

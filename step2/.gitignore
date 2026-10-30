@@ -1,0 +1,7 @@
+.env
+published/
+__pycache__/
+.venv/
+verify_output_*.txt
+install_log.txt
+mcp_server/attempts.json

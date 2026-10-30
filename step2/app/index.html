@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Story agent</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1c1c1c; }
+  textarea, input { width: 100%; box-sizing: border-box; font: inherit; padding: .5rem; }
+  button { font: inherit; padding: .5rem 1rem; margin: .5rem .5rem 0 0; cursor: pointer; }
+  #story { white-space: pre-wrap; border: 1px solid #ccc; border-radius: 6px; padding: 1rem; margin-top: 1rem; }
+  #status { color: #555; margin-top: 1rem; }
+  [hidden] { display: none; }
+</style>
+</head>
+<body>
+<h1>Story agent</h1>
+<textarea id="message" rows="2">Write the season 1 story.</textarea>
+<button id="send">Write story</button>
+<div id="status"></div>
+
+<div id="review" hidden>
+  <h2 id="title"></h2>
+  <div id="story"></div>
+  <p><input id="feedback" placeholder="Feedback (used if you reject)"></p>
+  <button id="approve">Approve and publish</button>
+  <button id="reject">Reject and revise</button>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let threadId = null;
+
+async function call(url, body) {
+  $("status").textContent = "Working…";
+  document.querySelectorAll("button").forEach(b => b.disabled = true);
+  try {
+    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    render(data);
+  } catch (err) {
+    $("status").textContent = "Error: " + err.message;
+  } finally {
+    document.querySelectorAll("button").forEach(b => b.disabled = false);
+  }
+}
+
+function render(data) {
+  threadId = data.thread_id;
+  const waiting = data.status === "awaiting_approval";
+  $("review").hidden = !waiting;
+  if (waiting) {
+    $("title").textContent = data.story.title;
+    $("story").textContent = data.story.story;
+    $("feedback").value = "";
+    $("status").textContent = "Awaiting your approval until " + new Date(data.approval_expires_at).toLocaleString() + ". LLM calls this request: " + data.llm_calls;
+  } else if (data.status === "failed") {
+    $("status").textContent = "Publishing failed after approval: " + data.error;
+    threadId = null;
+  } else {
+    $("status").textContent = data.reply;
+    threadId = null;
+  }
+}
+
+$("send").onclick = () => call("/chat", { message: $("message").value });
+$("approve").onclick = () => call(`/chat/${threadId}/decision`, { decision: "approve" });
+$("reject").onclick = () => call(`/chat/${threadId}/decision`, { decision: "reject", feedback: $("feedback").value });
+</script>
+</body>
+</html>
