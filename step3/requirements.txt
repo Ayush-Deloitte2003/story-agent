@@ -1,5 +1,6 @@
 deepagents>=0.7
 langchain-litellm>=0.11
+litellm==1.105.0
 langchain-mcp-adapters>=0.3
 mcp>=1.30,<2
 dapr>=1.18
