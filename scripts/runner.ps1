@@ -12,6 +12,7 @@ $Step2 = Join-Path $Root "step2"
 $Step3 = Join-Path $Root "step3"
 $DaprBin = Join-Path $env:USERPROFILE ".dapr\bin"
 $DaprCli = Join-Path $Root "tools\dapr"   # Dapr CLI downloaded here when winget is not allowed
+$K8sTools = Join-Path $Root "tools\k8s"   # kind + kubectl downloaded here (no winget / no admin)
 
 function Say($text, $color = "Cyan") { Write-Host ""; Write-Host "== $text" -ForegroundColor $color }
 function Fail($text) { Write-Host ""; Write-Host "FAILED: $text" -ForegroundColor Red; exit 1 }
@@ -19,6 +20,7 @@ function Refresh-Path {
     $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
     if (Test-Path "C:\dapr") { $env:Path += ";C:\dapr" }
     if (Test-Path $DaprCli) { $env:Path += ";$DaprCli" }
+    if (Test-Path $K8sTools) { $env:Path += ";$K8sTools" }
 }
 function Has($cmd) { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 function Listening($port) { [bool](Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) }
@@ -201,10 +203,24 @@ switch ($Action) {
         & powershell -ExecutionPolicy Bypass -File k8s\deploy-kind.ps1
     }
     "kind-tools" {
-        winget install --id Docker.DockerDesktop -e --accept-source-agreements --accept-package-agreements
-        winget install --id Kubernetes.kind -e --accept-source-agreements --accept-package-agreements
-        winget install --id Kubernetes.kubectl -e --accept-source-agreements --accept-package-agreements
-        Say "Installed. Restart Windows, open Docker Desktop and wait until it is running, then: .\run step3-kind" "Green"
+        # winget is blocked by policy: download the kind and kubectl binaries directly (no admin needed).
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        New-Item -ItemType Directory -Force $K8sTools | Out-Null
+        $kubectlVersion = (Invoke-WebRequest -UseBasicParsing "https://dl.k8s.io/release/stable.txt").Content.Trim()
+        $downloads = @(
+            @{ Name = "kind.exe";    Url = "https://kind.sigs.k8s.io/dl/v0.24.0/kind-windows-amd64" },
+            @{ Name = "kubectl.exe"; Url = "https://dl.k8s.io/release/$kubectlVersion/bin/windows/amd64/kubectl.exe" }
+        )
+        foreach ($d in $downloads) {
+            $target = Join-Path $K8sTools $d.Name
+            if (-not (Test-Path $target)) { Say "Downloading $($d.Name)"; Invoke-WebRequest -UseBasicParsing $d.Url -OutFile $target }
+        }
+        Refresh-Path
+        if (-not (Has "docker")) {
+            Say "kind and kubectl are ready. Docker is still missing: install Docker Desktop (needs admin/IT approval), start it, then: .\run step3-kind" "Yellow"
+        } else {
+            Say "kind and kubectl are ready. Next: .\run step3-kind" "Green"
+        }
     }
 
     "stop" { Stop-All; Say "Stopped the apps and MCP servers (the Dapr placement/scheduler windows can stay open)." "Green" }

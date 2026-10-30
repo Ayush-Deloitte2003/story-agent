@@ -92,6 +92,14 @@ kubectl port-forward svc/story-agent 8000:8000
 Leave the port-forward running, open a second terminal in this folder and run
 `.\run step3-verify`.
 
+### No Docker on the laptop? Run Kind in GitHub Actions
+
+Push this repo to GitHub, add the repository secret `OPENAI_API_KEY`
+(Settings > Secrets and variables > Actions), then run the **step3-kind** workflow
+(Actions tab > step3-kind > Run workflow). It creates a Kind cluster, installs Dapr, deploys
+Redis + publisher + app, runs `verify_step3.py` (`run`), then the pod-delete restart test
+(`start` > delete pod > `resume`). Download the `step3-kind-reports` artifact for the pass reports.
+
 ## Stop everything
 
 ```powershell

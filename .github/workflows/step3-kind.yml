@@ -1,0 +1,101 @@
+name: step3-kind
+
+# Runs Step 3 on a Kind cluster (Dapr in Kubernetes mode, Redis state store) in GitHub Actions,
+# because the developer laptop cannot run Docker/Podman. Manual trigger only: it calls OpenAI.
+# Needs the repository secret OPENAI_API_KEY.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CLUSTER: story
+  DAPR_CLI_VERSION: 1.18.2
+
+jobs:
+  kind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: step3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ${{ env.CLUSTER }}
+
+      - name: Install Dapr in the cluster
+        run: |
+          wget -q https://raw.githubusercontent.com/dapr/cli/master/install/install.sh -O - | /bin/bash -s "$DAPR_CLI_VERSION"
+          dapr init -k --wait --timeout 600
+          kubectl get pods -n dapr-system
+
+      - name: Build and load the image
+        run: |
+          docker build -t story-agent:dev .
+          kind load docker-image story-agent:dev --name "$CLUSTER"
+
+      - name: Create secret and deploy
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          test -n "$OPENAI_API_KEY" || { echo "Repository secret OPENAI_API_KEY is not set"; exit 1; }
+          kubectl create secret generic story-agent-env --from-literal=OPENAI_API_KEY="$OPENAI_API_KEY"
+          kubectl apply -f k8s/redis.yaml -f k8s/statestore.yaml -f k8s/publisher.yaml -f k8s/story-agent.yaml
+          for d in redis publisher story-agent; do kubectl rollout status "deployment/$d" --timeout=300s; done
+          kubectl get pods
+
+      - name: Verify (retries, expiry, 410)
+        run: |
+          kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          sleep 5
+          python scripts/verify_step3.py run
+
+      - name: Restart test (delete the app pod)
+        run: |
+          pkill -f "kubectl port-forward" || true
+          kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          sleep 5
+          python scripts/verify_step3.py start
+          old=$(kubectl get pod -l app=story-agent -o name)
+          kubectl delete "$old" --wait=false
+          kubectl wait --for=delete "$old" --timeout=180s
+          kubectl wait --for=condition=Ready pod -l app=story-agent --timeout=300s
+          kubectl get pods
+          pkill -f "kubectl port-forward" || true
+          kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          sleep 5
+          python scripts/verify_step3.py resume
+
+      - name: Evidence (Redis keys, published story)
+        run: |
+          kubectl get pods -o wide | tee verify_output_step3_kind_pods.txt
+          { echo "--- redis keys"; kubectl exec deploy/redis -- redis-cli --scan | head -20; } | tee verify_output_step3_kind_redis.txt
+          { echo "--- published"; kubectl exec deploy/publisher -- ls /data/published; } | tee verify_output_step3_kind_published.txt
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -A
+          kubectl describe pods -l app=story-agent || true
+          kubectl logs -l app=story-agent --all-containers --tail=200 || true
+          kubectl logs -l app=publisher --tail=100 || true
+          kubectl get pods -n dapr-system
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: step3-kind-reports
+          path: step3/verify_output_step3_*.txt
+          if-no-files-found: warn
