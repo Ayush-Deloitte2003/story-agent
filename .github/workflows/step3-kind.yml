@@ -80,7 +80,7 @@ jobs:
       - name: Evidence (Redis keys, published story)
         run: |
           kubectl get pods -o wide | tee verify_output_step3_kind_pods.txt
-          { echo "--- redis keys"; kubectl exec deploy/redis -- redis-cli --scan | head -20; } | tee verify_output_step3_kind_redis.txt
+          { echo "--- redis keys"; kubectl exec deploy/redis -- redis-cli --scan | sed -n '1,20p'; } | tee verify_output_step3_kind_redis.txt
           { echo "--- published"; kubectl exec deploy/publisher -- ls /data/published; } | tee verify_output_step3_kind_published.txt
 
       - name: Diagnostics on failure
