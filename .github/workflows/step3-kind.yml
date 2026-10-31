@@ -13,6 +13,8 @@ permissions:
 env:
   CLUSTER: story
   DAPR_CLI_VERSION: 1.18.2
+  DAPR_RUNTIME_VERSION: 1.19.0
+  VERIFY_REPORT_PREFIX: kind
 
 jobs:
   kind:
@@ -29,6 +31,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Deterministic publisher and workflow unit tests
+        run: python -m unittest discover -s tests -v
+
       - name: Create Kind cluster
         uses: helm/kind-action@v1
         with:
@@ -37,8 +42,9 @@ jobs:
       - name: Install Dapr in the cluster
         run: |
           wget -q https://raw.githubusercontent.com/dapr/cli/master/install/install.sh -O - | /bin/bash -s "$DAPR_CLI_VERSION"
-          dapr init -k --wait --timeout 600
+          dapr init -k --runtime-version "$DAPR_RUNTIME_VERSION" --wait --timeout 600
           kubectl get pods -n dapr-system
+          dapr status -k
 
       - name: Build and load the image
         run: |
@@ -77,11 +83,93 @@ jobs:
           sleep 5
           python scripts/verify_step3.py resume
 
+      - name: Publishing recovery across publisher and app replacement
+        run: |
+          pkill -f "kubectl port-forward" || true
+          kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          sleep 5
+          python scripts/verify_step3.py publishing-start
+          pkill -f "kubectl port-forward" || true
+          found=false
+          for attempt in {1..30}; do
+            if kubectl exec deploy/publisher -- cat /data/attempts.json > verify_output_step3_kind_publisher_before.json 2>/dev/null &&
+                python scripts/verify_publisher_state.py verify_output_step3_publishing-start_approved.json verify_output_step3_kind_publisher_before.json >/dev/null 2>&1; then
+              found=true
+              break
+            fi
+            sleep 1
+          done
+          test "$found" = true || { echo "Publisher did not record the first retry attempt"; exit 1; }
+          kubectl scale deployment/story-agent --replicas=0
+          kubectl wait --for=delete pod -l app=story-agent --timeout=180s
+          python scripts/verify_publisher_state.py verify_output_step3_publishing-start_approved.json verify_output_step3_kind_publisher_before.json
+          kubectl rollout restart deployment/publisher
+          kubectl rollout status deployment/publisher --timeout=300s
+          kubectl exec deploy/publisher -- cat /data/attempts.json > verify_output_step3_kind_publisher_after.json
+          python scripts/verify_publisher_state.py verify_output_step3_publishing-start_approved.json verify_output_step3_kind_publisher_after.json --previous-state verify_output_step3_kind_publisher_before.json
+          kubectl scale deployment/story-agent --replicas=1
+          kubectl rollout status deployment/story-agent --timeout=300s
+          kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          sleep 5
+          python scripts/verify_step3.py publishing-resume
+          published_name=$(python -c 'import json,re; d=json.load(open("verify_output_step3_publishing-resume_approved.json", encoding="utf-8")); print(re.search(r"published/([^ ]+)", d["reply"]).group(1))')
+          kubectl exec deploy/publisher -- cat "/data/published/$published_name" > verify_output_step3_kind_publishing-recovery.md
+          kubectl exec deploy/publisher -- cat /data/attempts.json > verify_output_step3_kind_publisher_final.json
+          python scripts/verify_publisher_state.py verify_output_step3_publishing-resume_approved.json verify_output_step3_kind_publisher_final.json --previous-state verify_output_step3_kind_publisher_before.json --published-markdown verify_output_step3_kind_publishing-recovery.md
+          python scripts/verify_published_story.py verify_output_step3_publishing-resume_approved.json verify_output_step3_kind_publishing-recovery.md
+
+      - name: Redis restart recovery
+        run: |
+          pkill -f "kubectl port-forward" || true
+          kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          sleep 5
+          python scripts/verify_step3.py redis-start
+          kubectl rollout restart deployment/redis
+          kubectl rollout status deployment/redis --timeout=300s
+          pkill -f "kubectl port-forward" || true
+          kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          sleep 5
+          python scripts/verify_step3.py redis-resume
+
+      - name: Approval expiry during app downtime
+        run: |
+          pkill -f "kubectl port-forward" || true
+          kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          sleep 5
+          python scripts/verify_step3.py expiry-start
+          pkill -f "kubectl port-forward" || true
+          kubectl scale deployment/story-agent --replicas=0
+          kubectl wait --for=delete pod -l app=story-agent --timeout=180s
+          sleep 15
+          kubectl scale deployment/story-agent --replicas=1
+          kubectl rollout status deployment/story-agent --timeout=300s
+          kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          sleep 5
+          python scripts/verify_step3.py expiry-resume
+
+      - name: Retry exhaustion
+        run: |
+          pkill -f "kubectl port-forward" || true
+          kubectl set env deployment/story-agent PUBLISH_MAX_ATTEMPTS=2
+          kubectl rollout status deployment/story-agent --timeout=300s
+          kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          sleep 5
+          python scripts/verify_step3.py exhaust
+
       - name: Evidence (Redis keys, published story)
         run: |
           kubectl get pods -o wide | tee verify_output_step3_kind_pods.txt
-          { echo "--- redis keys"; kubectl exec deploy/redis -- redis-cli --scan | sed -n '1,20p'; } | tee verify_output_step3_kind_redis.txt
-          { echo "--- published"; kubectl exec deploy/publisher -- ls /data/published; } | tee verify_output_step3_kind_published.txt
+          keys=$(kubectl exec deploy/redis -- redis-cli --scan)
+          printf '%s\n' "$keys" | tee verify_output_step3_kind_redis.txt | sed -n '1,20p'
+          grep -Fq 'story-agent||dapr.internal.default.story-agent.workflow||' <<< "$keys" || {
+            echo "Expected Dapr workflow state keys are missing from Redis"; exit 1;
+          }
+          published_name=$(python -c 'import json,re; d=json.load(open("verify_output_step3_run_approved.json", encoding="utf-8")); print(re.search(r"published/([^ ]+)", d["reply"]).group(1))')
+          kubectl exec deploy/publisher -- cat "/data/published/$published_name" > verify_output_step3_kind_published.md
+          python scripts/verify_published_story.py verify_output_step3_run_approved.json verify_output_step3_kind_published.md
+          kubectl rollout restart deployment/publisher
+          kubectl rollout status deployment/publisher --timeout=300s
+          kubectl exec deploy/publisher -- test -s "/data/published/$published_name"
 
       - name: Diagnostics on failure
         if: failure()
@@ -94,8 +182,42 @@ jobs:
 
       - name: Upload reports
         if: always()
+        id: reports
         uses: actions/upload-artifact@v4
         with:
           name: step3-kind-reports
-          path: step3/verify_output_step3_*.txt
+          path: |
+            step3/verify_output_step3_*.txt
+            step3/verify_output_step3_*.md
+            step3/verify_output_step3_*.json
           if-no-files-found: warn
+
+      - name: Write GitHub job summary
+        if: always()
+        env:
+          REPORT_ARTIFACT_URL: ${{ steps.reports.outputs.artifact-url }}
+        run: |
+          {
+            echo "## Step 3 Kind verification"
+            echo
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Python: $(python --version)"
+            echo "- Dapr CLI: $(dapr --version | head -n 1)"
+            echo "- Dapr runtime target: \`${DAPR_RUNTIME_VERSION}\`"
+            echo "- Dapr cluster status:"
+            echo '```text'
+            dapr status -k || true
+            echo '```'
+            if test -n "$REPORT_ARTIFACT_URL"; then
+              echo "- Reports and published Markdown: [step3-kind-reports]($REPORT_ARTIFACT_URL)"
+            else
+              echo "- Reports and published Markdown: see the \`step3-kind-reports\` artifact, if uploaded."
+            fi
+            echo
+            for report in verify_output_step3_kind_*.txt; do
+              test -f "$report" || continue
+              echo "### \`$report\`"
+              grep -E '^\[(PASS|FAIL)\]|ALL CHECKS PASSED|CHECK(S)? FAILED' "$report" || true
+              echo
+            done
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -6,6 +6,8 @@ metadata:
   name: publisher
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels: { app: publisher }
   template:
@@ -27,7 +29,16 @@ spec:
           volumeMounts: [{ name: data, mountPath: /data }]
       volumes:
         - name: data
-          emptyDir: {}
+          persistentVolumeClaim: { claimName: publisher-data }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: publisher-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests: { storage: 1Gi }
 ---
 apiVersion: v1
 kind: Service

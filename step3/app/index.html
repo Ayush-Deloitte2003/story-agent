@@ -5,81 +5,390 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Story agent</title>
 <style>
-  body { font: 16px/1.5 system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1c1c1c; }
-  textarea, input { width: 100%; box-sizing: border-box; font: inherit; padding: .5rem; }
-  button { font: inherit; padding: .5rem 1rem; margin: .5rem .5rem 0 0; cursor: pointer; }
-  #story { white-space: pre-wrap; border: 1px solid #ccc; border-radius: 6px; padding: 1rem; margin-top: 1rem; }
-  #status { color: #555; margin-top: 1rem; }
-  [hidden] { display: none; }
+  :root { color-scheme: light; font: 16px/1.5 system-ui, sans-serif; color: #172033; background: #f5f7fb; }
+  body { max-width: 900px; margin: 2rem auto; padding: 0 1rem 3rem; }
+  h1, h2, h3 { line-height: 1.2; }
+  .card { background: white; border: 1px solid #d9deea; border-radius: 10px; padding: 1rem 1.25rem; margin: 1rem 0; }
+  textarea, input, select { width: 100%; box-sizing: border-box; font: inherit; padding: .65rem; border: 1px solid #aeb8ca; border-radius: 6px; }
+  button { font: inherit; padding: .55rem .9rem; margin: .55rem .5rem 0 0; border: 1px solid #aeb8ca; border-radius: 6px; background: #fff; cursor: pointer; }
+  button.primary { color: white; background: #174ea6; border-color: #174ea6; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  #story { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 32rem; overflow: auto; }
+  #status { font-weight: 600; }
+  #error, .muted { color: #596579; }
+  #error { color: #a12622; }
+  .toolbar { display: flex; gap: .75rem; align-items: end; }
+  .toolbar > label { flex: 1; }
+  .timeline { padding-left: 1.25rem; }
+  .timeline time { color: #596579; margin-right: .5rem; }
+  .revision-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+  .revision-columns pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; background: #f5f7fb; padding: .75rem; border-radius: 6px; }
+  [hidden] { display: none !important; }
+  @media (max-width: 620px) { .toolbar, .revision-columns { display: block; } }
 </style>
 </head>
 <body>
 <h1>Story agent</h1>
-<textarea id="message" rows="2">Write the season 1 story.</textarea>
-<button id="send">Write story</button>
-<div id="status"></div>
+<section class="card">
+  <label for="message">Story request</label>
+  <textarea id="message" rows="2">Write the season 1 story.</textarea>
+  <button id="send" class="primary">Write story</button>
+  <p id="notice" class="muted" role="status" aria-live="polite"></p>
+</section>
 
-<div id="review" hidden>
+<section class="card" aria-labelledby="recent-heading">
+  <div class="toolbar">
+    <label id="recent-heading" for="recent">Recent workflows (saved in this browser)</label>
+    <button id="refresh" type="button">Refresh status</button>
+    <button id="remove" type="button">Remove from this browser</button>
+  </div>
+  <select id="recent" aria-label="Recent workflows"></select>
+</section>
+
+<section id="workflow" class="card" hidden>
+  <p id="status" role="status" aria-live="polite"></p>
+  <p id="error" role="alert"></p>
+  <p id="countdown" class="muted"></p>
   <h2 id="title"></h2>
   <div id="story"></div>
-  <p><input id="feedback" placeholder="Feedback (used if you reject)"></p>
-  <button id="approve">Approve and publish</button>
-  <button id="reject">Reject and revise</button>
-</div>
+  <div id="review-controls" hidden>
+    <label for="feedback">Feedback (used if you reject)</label>
+    <input id="feedback" placeholder="How should the next draft change?">
+    <button id="approve" class="primary">Approve and publish</button>
+    <button id="reject">Reject and revise</button>
+  </div>
+  <button id="download" type="button" hidden>Download Markdown</button>
+
+  <details id="comparison" hidden>
+    <summary>Compare with the previous draft</summary>
+    <div class="revision-columns">
+      <section><h3 id="previous-label"></h3><pre id="previous-story"></pre></section>
+      <section><h3 id="current-label"></h3><pre id="current-story"></pre></section>
+    </div>
+  </details>
+</section>
+
+<section id="timeline-panel" class="card" hidden>
+  <h2>Workflow timeline</h2>
+  <p class="muted">Browser-observed status changes for this workflow; refresh recovers current server state.</p>
+  <ol id="timeline" class="timeline"></ol>
+</section>
 
 <script>
 const $ = id => document.getElementById(id);
-let threadId = null;
+const STORAGE_KEY = "story-agent.recent-workflows.v1";
+const MAX_RUNS = 10;
+const MAX_EVENTS = 100;
+let runs = readRuns();
+let selectedId = null;
+let generation = 0;
+let pollTimer = null;
+let countdownTimer = null;
+let busy = false;
+let retryDelay = 3000;
+let storageWarning = "";
+let noticeText = "";
 
-async function call(url, body) {
-  $("status").textContent = "Working…";
-  document.querySelectorAll("button").forEach(b => b.disabled = true);
+function readRuns() {
   try {
-    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || res.statusText);
-    render(data);
-  } catch (err) {
-    $("status").textContent = "Error: " + err.message;
-  } finally {
-    document.querySelectorAll("button").forEach(b => b.disabled = false);
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+    return Array.isArray(stored)
+      ? stored.filter(run => run && typeof run.thread_id === "string").slice(0, MAX_RUNS)
+      : [];
+  } catch (error) {
+    storageWarning = "Browser storage is unavailable; refresh recovery is disabled.";
+    return [];
   }
 }
 
-function render(data) {
-  threadId = data.thread_id;
-  const waiting = data.status === "awaiting_approval";
-  $("review").hidden = !waiting;
-  if (waiting) {
-    $("title").textContent = data.story.title;
-    $("story").textContent = data.story.story;
-    $("feedback").value = "";
-    $("status").textContent = "Awaiting your approval until " + new Date(data.approval_expires_at).toLocaleString() +
-      ". LLM calls for this draft: " + data.llm_calls;
-  } else if (data.status === "publishing" || data.status === "writing") {
-    $("status").textContent = data.status === "publishing"
-      ? "Approved. Publishing; Dapr retries the MCP tool until it succeeds…"
-      : "Writing…";
-    setTimeout(poll, 2000);
-  } else if (data.status === "published") {
-    $("status").textContent = "Published. " + data.reply;
-  } else if (data.status === "failed") {
-    $("status").textContent = "Publishing failed after all retries: " + data.error;
-  } else if (data.status === "expired") {
-    $("status").textContent = "The approval window expired before a decision was made.";
+function saveRuns() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(runs.slice(0, MAX_RUNS)));
+    storageWarning = "";
+  } catch (error) {
+    storageWarning = "Could not save this workflow in browser storage.";
+  }
+}
+
+function selectedRun() {
+  return runs.find(run => run.thread_id === selectedId);
+}
+
+function addTimeline(run, label, status = run.status, revision = run.revision) {
+  run.timeline = Array.isArray(run.timeline) ? run.timeline : [];
+  const previous = run.timeline[run.timeline.length - 1];
+  if (previous && previous.status === status && previous.revision === revision && previous.label === label) return;
+  run.timeline.push({ at: Date.now(), label, status, revision });
+  run.timeline = run.timeline.slice(-MAX_EVENTS);
+}
+
+function syncRun(run, data) {
+  const oldStatus = run.status;
+  const oldRevision = run.revision;
+  const incomingRevision = Number.isInteger(data.revision) ? data.revision : (run.revision || 0);
+  if (run.story && Number.isInteger(oldRevision) && incomingRevision > oldRevision) {
+    run.revisions = Array.isArray(run.revisions) ? run.revisions : [];
+    if (!run.revisions.some(revision => revision.revision === oldRevision)) {
+      run.revisions.push({ revision: oldRevision, story: run.story });
+      run.revisions = run.revisions.slice(-10);
+    }
+  }
+  run.status = data.status || data.runtime_status || "unknown";
+  run.runtime_status = data.runtime_status || run.status.toUpperCase();
+  run.story = data.story || run.story || null;
+  run.revision = incomingRevision;
+  run.approval_expires_at = data.approval_expires_at || null;
+  run.reply = data.reply || null;
+  run.error = data.error || null;
+  run.updated_at = Date.now();
+  run.fetch_error = "";
+  if (!run.timeline) addTimeline(run, "Workflow created", run.status, run.revision);
+  if (oldStatus !== run.status || oldRevision !== run.revision) {
+    addTimeline(run, run.status === "awaiting_approval"
+      ? `Draft ${run.revision + 1} is ready for review`
+      : `Status changed to ${run.status}`);
+  }
+}
+
+function fillRecent() {
+  const select = $("recent");
+  select.replaceChildren();
+  if (!runs.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No saved workflows";
+    select.append(option);
   } else {
-    $("status").textContent = "Status: " + data.status;
+    for (const run of runs) {
+      const option = document.createElement("option");
+      option.value = run.thread_id;
+      option.textContent = `${run.story?.title || "Story"} — ${run.status || "unknown"}`;
+      select.append(option);
+    }
+  }
+  select.value = selectedId || "";
+}
+
+function renderTimeline(run) {
+  const list = $("timeline");
+  list.replaceChildren();
+  for (const event of run.timeline || []) {
+    const item = document.createElement("li");
+    const time = document.createElement("time");
+    time.dateTime = new Date(event.at).toISOString();
+    time.textContent = new Date(event.at).toLocaleString();
+    item.append(time, document.createTextNode(event.label));
+    list.append(item);
+  }
+  $("timeline-panel").hidden = !run.timeline?.length;
+}
+
+function renderComparison(run) {
+  const previous = run.revisions?.[run.revisions.length - 1];
+  $("comparison").hidden = !previous || !run.story;
+  if (!previous || !run.story) return;
+  $("previous-label").textContent = `Draft ${previous.revision + 1}`;
+  $("previous-story").textContent = previous.story.story || "";
+  $("current-label").textContent = `Draft ${(run.revision || 0) + 1}`;
+  $("current-story").textContent = run.story.story || "";
+}
+
+function renderCountdown() {
+  const run = selectedRun();
+  if (!run || run.status !== "awaiting_approval" || !run.approval_expires_at) {
+    $("countdown").textContent = "";
+    return;
+  }
+  const remaining = Math.max(0, Math.ceil((Date.parse(run.approval_expires_at) - Date.now()) / 1000));
+  $("countdown").textContent = remaining
+    ? `Approval expires in ${Math.floor(remaining / 60)}m ${remaining % 60}s (server deadline).`
+    : "Approval deadline passed; checking server status. Decisions are disabled.";
+  $("approve").disabled = busy || remaining === 0;
+  $("reject").disabled = busy || remaining === 0;
+}
+
+function render() {
+  fillRecent();
+  $("notice").textContent = noticeText || storageWarning;
+  const run = selectedRun();
+  $("workflow").hidden = !run;
+  $("send").disabled = busy;
+  $("refresh").disabled = busy || !run;
+  $("remove").disabled = busy || !run;
+  if (!run) {
+    $("timeline-panel").hidden = true;
+    return;
+  }
+
+  const waiting = run.status === "awaiting_approval";
+  $("status").textContent = `${run.status || "unknown"}${run.revision !== undefined ? ` · draft ${run.revision + 1}` : ""}`;
+  $("error").textContent = run.fetch_error || run.error || storageWarning;
+  $("title").textContent = run.story?.title || "";
+  $("story").textContent = run.story?.story || "";
+  $("review-controls").hidden = !waiting;
+  $("approve").disabled = busy || !waiting;
+  $("reject").disabled = busy || !waiting;
+  $("download").hidden = !run.story || !["publishing", "published"].includes(run.status);
+  renderComparison(run);
+  renderTimeline(run);
+  renderCountdown();
+}
+
+function stopTimers() {
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = null;
+  if (countdownTimer) clearInterval(countdownTimer);
+  countdownTimer = null;
+}
+
+function schedulePoll(token, delay) {
+  if (pollTimer) clearTimeout(pollTimer);
+  const run = selectedRun();
+  if (!run || !["writing", "publishing", "awaiting_approval"].includes(run.status)) return;
+  pollTimer = setTimeout(() => refreshStatus(token), delay);
+}
+
+async function refreshStatus(token = ++generation) {
+  const run = selectedRun();
+  if (!run) return;
+  try {
+    const response = await fetch(`/chat/${encodeURIComponent(run.thread_id)}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || response.statusText);
+    if (token !== generation || selectedId !== run.thread_id) return;
+    syncRun(run, data);
+    retryDelay = 3000;
+    saveRuns();
+    render();
+    schedulePoll(token, run.status === "awaiting_approval" ? 5000 : 2500);
+  } catch (error) {
+    if (token !== generation || selectedId !== run.thread_id) return;
+    run.fetch_error = `Status refresh failed: ${error.message}`;
+    saveRuns();
+    render();
+    retryDelay = Math.min(retryDelay * 2, 30000);
+    schedulePoll(token, retryDelay);
   }
 }
 
-async function poll() {
-  const res = await fetch(`/chat/${threadId}`);
-  if (res.ok) render(await res.json());
+function selectWorkflow(threadId) {
+  stopTimers();
+  selectedId = threadId || null;
+  noticeText = "";
+  generation++;
+  retryDelay = 3000;
+  const run = selectedRun();
+  if (run) {
+    countdownTimer = setInterval(renderCountdown, 1000);
+    render();
+    refreshStatus(generation);
+  } else {
+    render();
+  }
 }
 
-$("send").onclick = () => call("/chat", { message: $("message").value });
-$("approve").onclick = () => call(`/chat/${threadId}/decision`, { decision: "approve" });
-$("reject").onclick = () => call(`/chat/${threadId}/decision`, { decision: "reject", feedback: $("feedback").value });
+async function startWorkflow() {
+  if (busy) return;
+  busy = true;
+  render();
+  noticeText = "Starting a new workflow…";
+  $("notice").textContent = noticeText;
+  $("error").textContent = "";
+  try {
+    const response = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: $("message").value })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || response.statusText);
+    const run = { thread_id: data.thread_id, timeline: [], revisions: [], created_at: Date.now() };
+    runs = [run, ...runs.filter(item => item.thread_id !== run.thread_id)].slice(0, MAX_RUNS);
+    selectedId = run.thread_id;
+    syncRun(run, data);
+    saveRuns();
+    noticeText = "";
+    generation++;
+    stopTimers();
+    countdownTimer = setInterval(renderCountdown, 1000);
+  } catch (error) {
+    noticeText = `Could not start workflow: ${error.message}`;
+  } finally {
+    busy = false;
+    render();
+    const run = selectedRun();
+    if (run) schedulePoll(generation, 2500);
+  }
+}
+
+async function decide(decision) {
+  const run = selectedRun();
+  if (!run || busy || run.status !== "awaiting_approval") return;
+  busy = true;
+  render();
+  const submittedRevision = run.revision || 0;
+  try {
+    const response = await fetch(`/chat/${encodeURIComponent(run.thread_id)}/decision`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        decision,
+        feedback: decision === "reject" ? $("feedback").value : null,
+        expected_revision: run.revision || 0
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || response.statusText);
+    syncRun(run, data);
+    if (decision === "reject" && data.revision > submittedRevision) {
+      addTimeline(run, `Rejected draft ${submittedRevision + 1}; revision requested`);
+    } else {
+      addTimeline(run, decision === "approve" ? `Approved draft ${submittedRevision + 1}` : "Decision submitted");
+    }
+    saveRuns();
+    $("feedback").value = "";
+  } catch (error) {
+    run.fetch_error = `Decision was not confirmed: ${error.message}. Refresh status before retrying.`;
+    saveRuns();
+  } finally {
+    busy = false;
+    render();
+    if (selectedId === run.thread_id) refreshStatus(generation);
+  }
+}
+
+function downloadStory() {
+  const run = selectedRun();
+  if (!run?.story) return;
+  const title = run.story.title || "story";
+  const filename = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "story";
+  const blob = new Blob([`# ${title}\n\n${run.story.story || ""}\n`], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${filename}.md`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+$("send").addEventListener("click", startWorkflow);
+$("approve").addEventListener("click", () => decide("approve"));
+$("reject").addEventListener("click", () => decide("reject"));
+$("download").addEventListener("click", downloadStory);
+$("recent").addEventListener("change", event => selectWorkflow(event.target.value));
+$("refresh").addEventListener("click", () => refreshStatus(++generation));
+$("remove").addEventListener("click", () => {
+  if (!selectedId) return;
+  runs = runs.filter(run => run.thread_id !== selectedId);
+  saveRuns();
+  stopTimers();
+  selectedId = runs[0]?.thread_id || null;
+  if (selectedId) selectWorkflow(selectedId);
+  else { generation++; render(); }
+});
+
+render();
+if (runs.length) selectWorkflow(runs[0].thread_id);
 </script>
 </body>
 </html>

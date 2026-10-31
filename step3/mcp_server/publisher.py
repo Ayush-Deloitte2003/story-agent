@@ -19,8 +19,8 @@ import json
 import logging
 import os
 import re
+import tempfile
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -43,13 +43,57 @@ _lock = threading.Lock()
 mcp = FastMCP("publisher", host=HOST, port=PORT, log_level="WARNING")
 
 
-def _next_attempt(key: str) -> int:
+def _load_state() -> dict:
+    if not STATE_FILE.exists():
+        return {"attempts": {}, "published": {}}
+    state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    if "published" not in state:
+        state = {"attempts": state, "published": {}}
+    return state
+
+
+def _write_atomic(path: Path, contents: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(contents)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    finally:
+        if temporary and temporary.exists():
+            temporary.unlink()
+
+
+def _publish_once(key: str, title: str, story: str) -> str:
     with _lock:
-        counts = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
-        counts[key] = counts.get(key, 0) + 1
-        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(counts, indent=2))
-        return counts[key]
+        state = _load_state()
+        previous = state["published"].get(key)
+        if previous:
+            return previous["result"]
+
+        attempt = state["attempts"].get(key, 0) + 1
+        state["attempts"][key] = attempt
+        _write_atomic(STATE_FILE, json.dumps(state, indent=2))
+
+        if attempt <= FAIL_TIMES:
+            log.info("publish '%s' attempt %d of %d: FAIL", title, attempt, FAIL_TIMES + 1)
+            raise RuntimeError(
+                f"Publishing service unavailable (attempt {attempt}; "
+                f"this story succeeds on attempt {FAIL_TIMES + 1})"
+            )
+
+        PUBLISH_DIR.mkdir(parents=True, exist_ok=True)
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "story"
+        path = PUBLISH_DIR / f"{slug}-{key}.md"
+        _write_atomic(path, f"# {title}\n\n{story}\n")
+        result = f"Published '{title}' to published/{path.name} on attempt {attempt}"
+        state["published"][key] = {"attempt": attempt, "result": result}
+        _write_atomic(STATE_FILE, json.dumps(state, indent=2))
+        log.info("publish '%s' attempt %d: OK -> %s", title, attempt, path.name)
+        return result
 
 
 @mcp.tool()
@@ -60,23 +104,8 @@ def publish_story(title: str, story: str) -> str:
         title: Short title for the story.
         story: The complete story text.
     """
-    key = hashlib.sha256(f"{title}\n{story}".encode()).hexdigest()[:12]
-    attempt = _next_attempt(key)
-
-    if attempt <= FAIL_TIMES:
-        log.info("publish '%s' attempt %d of %d: FAIL", title, attempt, FAIL_TIMES + 1)
-        raise RuntimeError(
-            f"Publishing service unavailable (attempt {attempt}; "
-            f"this story succeeds on attempt {FAIL_TIMES + 1})"
-        )
-
-    PUBLISH_DIR.mkdir(parents=True, exist_ok=True)
-    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "story"
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = PUBLISH_DIR / f"{stamp}-{slug}.md"
-    path.write_text(f"# {title}\n\n{story}\n", encoding="utf-8")
-    log.info("publish '%s' attempt %d: OK -> %s", title, attempt, path.name)
-    return f"Published '{title}' to published/{path.name} on attempt {attempt}"
+    key = hashlib.sha256(f"{title}\n{story}".encode()).hexdigest()
+    return _publish_once(key, title, story)
 
 
 if __name__ == "__main__":

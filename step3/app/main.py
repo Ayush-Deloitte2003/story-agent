@@ -31,7 +31,8 @@ from fastapi.responses import FileResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 from app.agent import mcp_url  # noqa: E402
-from app.workflow import APPROVAL_EVENT, runtime, story_workflow  # noqa: E402
+from app.approval import approval_event_name  # noqa: E402
+from app.workflow import runtime, story_workflow  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("story-agent")
@@ -71,6 +72,7 @@ class ChatRequest(BaseModel):
 class DecisionRequest(BaseModel):
     decision: Literal["approve", "reject"]
     feedback: str | None = None
+    expected_revision: int | None = Field(None, ge=0)
 
 
 def _loads(raw):
@@ -141,9 +143,12 @@ async def decide(thread_id: str, req: DecisionRequest):
     if current is None:
         raise HTTPException(404, f"No run found for thread_id {thread_id}")
     if current["status"] == "awaiting_approval":
+        revision = current.get("revision", 0)
         expires = datetime.fromisoformat(current["approval_expires_at"])
         if datetime.now(timezone.utc) > expires:
             raise HTTPException(410, "The approval window for this story has expired.")
+        if req.expected_revision is not None and req.expected_revision != revision:
+            raise HTTPException(409, "This draft has changed. Refresh before deciding.")
     elif current["status"] == "expired":
         raise HTTPException(410, "The approval window for this story has expired.")
     else:
@@ -151,7 +156,7 @@ async def decide(thread_id: str, req: DecisionRequest):
 
     log.info("Human decision on %s: %s", thread_id, req.decision)
     await asyncio.to_thread(
-        client.raise_workflow_event, thread_id, APPROVAL_EVENT,
+        client.raise_workflow_event, thread_id, approval_event_name(current.get("revision", 0)),
         data={"decision": req.decision, "feedback": req.feedback},
     )
 

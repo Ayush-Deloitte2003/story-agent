@@ -3,7 +3,10 @@ published/
 __pycache__/
 .venv/
 verify_output_*.txt
+verify_output_*.json
+verify_output_*.md
 install_log.txt
 mcp_server/attempts.json
 dapr/state.db*
 .step3_pending.json
+.step3_pending_*.json

@@ -1,7 +1,7 @@
 """The Dapr workflow that makes the story pipeline durable.
 
     write_story (activity: deep agent + LLM)
-        -> wait for the "approval" event, or the approval timer, whichever first
+        -> wait for the revision-specific approval event, or the approval timer
              reject  -> write_story again with the feedback
              timeout -> end as "expired"
              approve -> publish_story (activity: MCP tool, retried by Dapr)
@@ -19,10 +19,9 @@ from datetime import timedelta
 import dapr.ext.workflow as wf
 
 from app.agent import draft_story, publish_via_mcp
+from app.approval import approval_event_name
 
 log = logging.getLogger("story-agent")
-
-APPROVAL_EVENT = "approval"
 
 # Writing calls an LLM, which can hit transient errors too.
 WRITE_RETRY = wf.RetryPolicy(
@@ -62,7 +61,7 @@ def story_workflow(ctx: wf.DaprWorkflowContext, inp: dict):
         _status(ctx, "awaiting_approval", story=draft, revision=len(revisions),
                 approval_expires_at=expires_at.isoformat())
 
-        approval = ctx.wait_for_external_event(APPROVAL_EVENT)
+        approval = ctx.wait_for_external_event(approval_event_name(len(revisions)))
         timer = ctx.create_timer(expires_at)
         winner = yield wf.when_any([approval, timer])
 

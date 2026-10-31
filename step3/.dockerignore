@@ -4,6 +4,9 @@ published
 dapr/state.db*
 **/__pycache__
 verify_output_*.txt
+verify_output_*.json
+verify_output_*.md
 .step3_pending.json
+.step3_pending_*.json
 mcp_server/attempts.json
 k8s

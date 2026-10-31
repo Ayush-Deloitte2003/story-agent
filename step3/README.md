@@ -9,13 +9,13 @@ MCP tool publishes it. **Dapr Workflow** makes the whole thing durable:
 POST /chat ──> Dapr workflow "story_workflow"
                  1. activity write_story ── deep agent reads SKILL.md, LLM writes the story,
                                             proposes publish_story(title, story)
-                 2. durable wait for the "approval" event   ⏳ (APPROVAL_TIMEOUT_HOURS, default 24h)
+                 2. durable wait for the revision-specific approval event   ⏳ (default 24h)
                       reject + feedback ──> back to 1 with the feedback
                       timer fires first ──> ends as "expired"
                  3. activity publish_story ── MCP tool on the publisher server
                       RuntimeError ──> Dapr retries with backoff (1s, 1.5s, 2.3s … up to 10s)
                       attempt 8 succeeds ──> ends as "published"
-POST /chat/{thread_id}/decision ──> raises the "approval" event on the workflow
+POST /chat/{thread_id}/decision ──> raises the revision-specific approval event
 GET  /chat/{thread_id}          ──> reads the workflow's state from Dapr
 ```
 
@@ -30,6 +30,17 @@ Every step is recorded in Dapr's state store, so:
 
 The deep agent decides *what* to publish (it proposes the `publish_story`
 call); Dapr owns the waiting and the retried execution of that call.
+
+The publisher stores its attempt ledger and Markdown output on a Kubernetes
+PersistentVolumeClaim. Attempts and published-result records are atomically
+replaced, and a publication uses a stable content-derived filename. A retry
+after a successful publish returns the saved result instead of creating a
+second file. This protects the publisher's filesystem side effects from a lost
+response; it is not a claim of end-to-end exactly-once delivery.
+
+Approval events are revision-specific. The existing decision endpoint also
+accepts an optional `expected_revision`; stale browser decisions receive HTTP
+409, while existing clients that omit the field retain the original behavior.
 
 ## Option 1: run locally with Dapr (quickest)
 
@@ -92,13 +103,42 @@ secret missing, sidecar not injected). To start over: `kind delete cluster --nam
 With the app running (either option):
 
 ```powershell
+python -m unittest discover -s tests -v         # deterministic, no API key or Dapr needed
 .venv\Scripts\python scripts\verify_step3.py          # revise, retries, expiry
 .venv\Scripts\python scripts\verify_step3.py start    # leave a story awaiting approval
 #   ...stop and restart the app (Ctrl+C + dapr run again, or delete the pod in Kind)...
 .venv\Scripts\python scripts\verify_step3.py resume   # it is still there; approve and publish
 ```
 
-Reports are saved as `verify_output_step3_*.txt`.
+Local reports are saved as `verify_output_step3_<mode>.txt`; the Kind workflow
+uses the `verify_output_step3_kind_<mode>.txt` prefix.
+
+The browser stores up to ten recent workflow snapshots in local storage, refreshes
+the selected workflow from the server on reload, and shows its current status,
+approval countdown, browser-observed timeline, and previous-draft comparison.
+Use **Download Markdown** to save the current approved or published draft.
+Timeline entries are client-observed and therefore are not a durable server audit
+log. Removing an item clears only this browser's saved copy; it does not cancel
+the server-side workflow.
+
+The manual `step3-kind` GitHub Actions workflow uses Python 3.12, Dapr CLI
+1.18.2, and Dapr runtime 1.19.0. `requirements.txt` pins the direct Python
+dependencies to versions resolved by the successful Kind run; Docker installs
+the complete transitive set from `requirements-kind.lock`, captured from that
+same run. The workflow tests publisher persistence/idempotency and stale
+revision decisions, checks the exact successful attempt number and Redis
+workflow key prefix, compares the downloaded published Markdown byte-for-byte
+with the approved draft, and then restarts the publisher to check its volume.
+It also tests app-pod replacement, Redis restart recovery, expiry while the app
+is down, and exhausted publish retries. The GitHub job summary and uploaded
+`step3-kind-reports` artifact include verification reports and the published
+Markdown.
+
+Only the earlier Kind execution at commit `3754167` is a completed cluster
+verification. Changes in progress must be run through `step3-kind` before they
+can be described as verified on Kind. Local unit tests do not require the
+OpenAI key; the Kind workflow does and receives it through the repository
+Actions secret.
 
 ## Layout
 
@@ -107,7 +147,7 @@ Reports are saved as `verify_output_step3_*.txt`.
 | `app/workflow.py` | The Dapr workflow, its two activities and the retry policies |
 | `app/agent.py` | Deep agent (skill + LLM) that drafts the story; MCP client for publishing |
 | `app/main.py` | FastAPI endpoints on top of the Dapr workflow client |
-| `app/index.html` | Review page: story, approve / reject, live publishing status |
+| `app/index.html` | Reviewer dashboard: recent workflows, timeline, countdown, revision comparison, downloads |
 | `mcp_server/publisher.py` | Flaky MCP server: each story fails 7 times, then publishes |
 | `skills/hp-season-1/SKILL.md` | The skill the agent follows to write the story |
 | `dapr/components/statestore.yaml` | Local state store (SQLite) for `dapr run` |
