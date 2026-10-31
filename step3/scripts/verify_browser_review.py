@@ -40,6 +40,20 @@ def verify_review_journey() -> None:
             page.set_default_timeout(120_000)
             decisions: list[dict] = []
 
+            def record_decision(request) -> None:
+                if request.method == "POST" and request.url.endswith("/decision"):
+                    decisions.append(json.loads(request.post_data or "{}"))
+
+            page.on("request", record_decision)
+            page_response = page.goto(BASE_URL, wait_until="networkidle")
+            page_body = page.locator("body").inner_text()
+            check("Reviewer page loads with the story request form",
+                  page_response is not None
+                  and page_response.ok
+                  and page.locator("#message").count() == 1,
+                  f"HTTP {page_response.status if page_response else 'no response'}; "
+                  f"page text: {page_body[:500]}")
+
             page.locator("#message").fill("A temporary prompt to check the example buttons.")
             page.get_by_role("button", name="Finding friendship").click()
             example_text = page.locator("#message").input_value()
@@ -47,12 +61,6 @@ def verify_review_journey() -> None:
                   "new student finding a friend" in example_text
                   and page.locator("#request-count").inner_text() == f"{len(example_text)} / 2000")
 
-            def record_decision(request) -> None:
-                if request.method == "POST" and request.url.endswith("/decision"):
-                    decisions.append(json.loads(request.post_data or "{}"))
-
-            page.on("request", record_decision)
-            page.goto(BASE_URL, wait_until="networkidle")
             page.locator("#message").fill(
                 "Write a brief season 1 story about a new student. Keep it concise."
             )
