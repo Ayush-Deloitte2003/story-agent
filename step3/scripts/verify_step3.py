@@ -233,7 +233,8 @@ elif args.mode == "publishing-resume":
           done.get("status") == "published" and attempt == 8,
           f"status={done.get('status')}, attempt={attempt}")
     if done.get("status") == "published":
-        approved = json.loads(APPROVED_DRAFT.read_text(encoding="utf-8"))
+        start_evidence = ROOT / "verify_output_step3_publishing-start_approved.json"
+        approved = json.loads(start_evidence.read_text(encoding="utf-8"))
         approved["reply"] = done.get("reply")
         APPROVED_DRAFT.write_text(json.dumps(approved), encoding="utf-8")
     out(f"    {done.get('reply') or done.get('error')}")
