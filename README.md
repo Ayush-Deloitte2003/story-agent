@@ -76,6 +76,42 @@ This leaves a story waiting for approval, **stops the app**, starts it again, th
 approves the same story. Expect: "After the restart, the story is still awaiting
 approval" and **ALL CHECKS PASSED**.
 
+### Step 3: end-to-end workflow
+
+The reviewer page is the human-in-the-loop gate: a story is not published until
+the reviewer approves the current draft. Rejecting with feedback sends the
+workflow back for a revised draft. The approval wait has a deadline; if it
+expires, the workflow ends without publishing.
+
+```mermaid
+flowchart TD
+    USER[User opens reviewer page and enters request] --> REQUEST[Click Write story]
+    REQUEST --> API[FastAPI accepts request]
+    API --> WF[Dapr starts durable story workflow]
+    WF --> DRAFT[Story agent drafts using the writing skill and LLM]
+    DRAFT --> REVIEW[Draft appears in reviewer page]
+    REVIEW --> DECISION{Human decision before deadline?}
+    DECISION -->|No — deadline expires| EXPIRED[Workflow ends as expired]
+    DECISION -->|Reject with feedback| REVISE[Submit feedback for this revision]
+    REVISE --> DRAFT
+    DECISION -->|Approve current revision| APPROVE[Submit approval for this revision]
+    APPROVE --> PUBLISH[Dapr runs publishing activity]
+    PUBLISH --> MCP[Publisher MCP tool saves Markdown]
+    MCP --> RESULT{Publish succeeded?}
+    RESULT -->|No — retry with backoff| PUBLISH
+    RESULT -->|Retries exhausted| FAILED[Workflow ends as failed]
+    RESULT -->|Yes| PUBLISHED[Workflow ends as published]
+    PUBLISHED --> DOWNLOAD[Reviewer can download published Markdown]
+    WF -. workflow progress .-> STATE[(Dapr state store)]
+    MCP -. attempts and published files .-> STORAGE[(Persistent publisher storage)]
+```
+
+The browser refreshes workflow status and keeps a local list of recent workflows
+and a browser-observed timeline. Dapr persists workflow progress and the approval
+deadline, so an app restart does not lose a pending review. In the Kind
+deployment, workflow state is stored in Redis and publisher files are on
+persistent storage; local Dapr uses the configured local state store.
+
 ## 5. Step 3 on a Kind cluster (optional, needs Docker)
 
 ```powershell
@@ -97,14 +133,15 @@ Leave the port-forward running, open a second terminal in this folder and run
 Push this repo to GitHub, add the repository secret `OPENAI_API_KEY`
 (Settings > Secrets and variables > Actions), then run the **step3-kind** workflow
 (Actions tab > step3-kind > Run workflow). It creates a Kind cluster, installs Dapr, deploys
-Redis + publisher + app, runs `verify_step3.py` (`run`), then the pod-delete restart test
-(`start` > delete pod > `resume`). Download the `step3-kind-reports` artifact for the pass reports.
+Redis + publisher + app, runs deterministic and API-level checks, then tests the browser reviewer
+journey, concurrent decisions, and recovery scenarios. Download the `step3-kind-reports`
+artifact for the verification reports and published Markdown.
 
 CLI equivalent: `gh workflow run step3-kind`, then `gh run watch`, then
 `gh run download <run-id> -n step3-kind-reports` (save as `step3/verify_output_step3_kind_*.txt`).
-Verified green on GitHub Actions: pods 2/2, `run` and restart test ALL CHECKS PASSED, Dapr keys in Redis,
-stories published on attempt 8. `step3/requirements.txt` pins `mcp<2` and `litellm==1.105.0`
-(newer releases break the image: `FastMCP` removed in mcp 2.x, litellm 1.106 needs mcp 2.x).
+Verified green on GitHub Actions: [run 41216975350](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/41216975350)
+passed the browser journey and recovery tests. `step3/requirements.txt` pins `mcp<2` and
+`litellm==1.105.0` (newer releases break the image: `FastMCP` removed in mcp 2.x, litellm 1.106 needs mcp 2.x).
 
 ## Stop everything
 
