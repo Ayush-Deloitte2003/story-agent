@@ -40,6 +40,13 @@ def verify_review_journey() -> None:
             page.set_default_timeout(120_000)
             decisions: list[dict] = []
 
+            page.locator("#message").fill("A temporary prompt to check the example buttons.")
+            page.get_by_role("button", name="Finding friendship").click()
+            example_text = page.locator("#message").input_value()
+            check("Example prompt updates the request and character count",
+                  "new student finding a friend" in example_text
+                  and page.locator("#request-count").inner_text() == f"{len(example_text)} / 2000")
+
             def record_decision(request) -> None:
                 if request.method == "POST" and request.url.endswith("/decision"):
                     decisions.append(json.loads(request.post_data or "{}"))
@@ -59,6 +66,10 @@ def verify_review_journey() -> None:
             check("A draft is displayed and waiting for human review",
                   bool(first_story.strip()) and "draft 1" in page.locator("#status").inner_text(),
                   page.locator("#status").inner_text())
+            check("Workflow progress highlights the human review step",
+                  page.locator("#progress-draft").get_attribute("class") == "complete"
+                  and page.locator("#progress-review").get_attribute("class") == "active",
+                  "draft complete; human review active")
             check("Review actions are available before publication",
                   page.locator("#review-controls").is_visible()
                   and page.get_by_role("button", name="Approve and publish").is_enabled()
@@ -97,6 +108,9 @@ def verify_review_journey() -> None:
             check("Approval through the browser completes publication",
                   "published" in final_status and final_story == revised_story,
                   final_status)
+            check("Workflow progress marks all steps complete after publication",
+                  all("complete" in (page.locator(selector).get_attribute("class") or "")
+                      for selector in ("#progress-draft", "#progress-review", "#progress-publish")))
 
             download_button = page.get_by_role("button", name="Download Markdown")
             check("Published story download is available", download_button.is_visible())

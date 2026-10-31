@@ -5,57 +5,180 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Story agent</title>
 <style>
-  :root { color-scheme: light; font: 16px/1.5 system-ui, sans-serif; color: #172033; background: #f5f7fb; }
-  body { max-width: 900px; margin: 2rem auto; padding: 0 1rem 3rem; }
-  h1, h2, h3 { line-height: 1.2; }
-  .card { background: white; border: 1px solid #d9deea; border-radius: 10px; padding: 1rem 1.25rem; margin: 1rem 0; }
-  textarea, input, select { width: 100%; box-sizing: border-box; font: inherit; padding: .65rem; border: 1px solid #aeb8ca; border-radius: 6px; }
-  button { font: inherit; padding: .55rem .9rem; margin: .55rem .5rem 0 0; border: 1px solid #aeb8ca; border-radius: 6px; background: #fff; cursor: pointer; }
-  button.primary { color: white; background: #174ea6; border-color: #174ea6; }
-  button:disabled { opacity: .5; cursor: not-allowed; }
-  #story { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 32rem; overflow: auto; }
-  #status { font-weight: 600; }
-  #error, .muted { color: #596579; }
-  #error { color: #a12622; }
-  .toolbar { display: flex; gap: .75rem; align-items: end; }
-  .toolbar > label { flex: 1; }
-  .timeline { padding-left: 1.25rem; }
-  .timeline time { color: #596579; margin-right: .5rem; }
-  .revision-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
-  .revision-columns pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; background: #f5f7fb; padding: .75rem; border-radius: 6px; }
+  :root {
+    color-scheme: light;
+    font: 16px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #17243b;
+    background: #f3f6fb;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    --ink: #17243b;
+    --muted: #64748b;
+    --line: #dce4ef;
+    --blue: #2457c5;
+    --blue-dark: #19449f;
+    --surface: #fff;
+  }
+  * { box-sizing: border-box; }
+  body { max-width: 1080px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+  h1, h2, h3, p { margin-top: 0; }
+  h1 { margin-bottom: .35rem; font-size: clamp(2rem, 5vw, 2.8rem); letter-spacing: -.045em; line-height: 1.1; }
+  h2, h3 { line-height: 1.25; letter-spacing: -.02em; }
+  h2 { font-size: 1.45rem; }
+  .page-header { margin-bottom: 1.75rem; }
+  .eyebrow { margin-bottom: .65rem; color: var(--blue); font-size: .75rem; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; }
+  .page-subtitle { max-width: 700px; margin-bottom: 0; color: var(--muted); font-size: 1.05rem; }
+  .card { margin: 1rem 0; padding: clamp(1.1rem, 3vw, 1.65rem); background: var(--surface); border: 1px solid var(--line); border-radius: 18px; box-shadow: 0 8px 24px rgb(23 36 59 / 4%); }
+  .request-card { border-top: 4px solid var(--blue); }
+  .section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; margin-bottom: 1rem; }
+  .section-heading h2 { margin-bottom: .25rem; }
+  .section-heading p { margin-bottom: 0; color: var(--muted); }
+  label { display: block; margin-bottom: .45rem; font-size: .92rem; font-weight: 700; }
+  textarea, input, select { width: 100%; padding: .8rem .9rem; border: 1px solid #c7d2e2; border-radius: 10px; background: #fff; color: var(--ink); font: inherit; transition: border-color .15s, box-shadow .15s; }
+  textarea { min-height: 100px; resize: vertical; }
+  textarea:focus, input:focus, select:focus, button:focus-visible, summary:focus-visible { outline: 3px solid rgb(36 87 197 / 22%); outline-offset: 2px; border-color: var(--blue); }
+  button { min-height: 42px; padding: .62rem 1rem; border: 1px solid #c7d2e2; border-radius: 10px; background: #fff; color: var(--ink); font: inherit; font-weight: 650; cursor: pointer; transition: background .15s, border-color .15s, transform .15s; }
+  button:hover:not(:disabled) { border-color: #9eafd0; background: #f7f9fd; }
+  button:active:not(:disabled) { transform: translateY(1px); }
+  button.primary { color: #fff; background: var(--blue); border-color: var(--blue); }
+  button.primary:hover:not(:disabled) { background: var(--blue-dark); border-color: var(--blue-dark); }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  .request-actions { display: flex; justify-content: space-between; align-items: center; gap: 1rem; margin-top: .75rem; }
+  .request-actions button { min-height: 48px; padding-inline: 1.25rem; }
+  .prompt-suggestions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-top: 1rem; }
+  .prompt-suggestions > span { margin-right: .25rem; color: var(--muted); font-size: .85rem; }
+  .prompt-chip { min-height: 34px; padding: .35rem .7rem; border-radius: 999px; color: #36527e; font-size: .82rem; font-weight: 600; }
+  .muted, #error { color: var(--muted); }
+  #notice { min-height: 1.5em; margin: .5rem 0 0; }
+  #notice:not(:empty) { color: var(--blue); font-weight: 600; }
+  #error { margin: .75rem 0; color: #a12622; overflow-wrap: anywhere; }
+  .recent-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: .75rem 1rem; }
+  .recent-card label { margin: 0; }
+  .recent-actions { display: flex; gap: .5rem; }
+  .recent-actions button { margin: 0; }
+  #recent { grid-column: 1 / -1; }
+  #workflow { padding: clamp(1.1rem, 3vw, 1.8rem); }
+  .workflow-topline { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1.2rem; }
+  #status { margin: 0; font-size: .9rem; font-weight: 750; }
+  .status-pill { display: inline-flex; align-items: center; gap: .45rem; padding: .35rem .7rem; border: 1px solid var(--line); border-radius: 999px; background: #f7f9fc; text-transform: capitalize; }
+  .status-pill::before { width: .5rem; height: .5rem; border-radius: 50%; background: #94a3b8; content: ""; }
+  .status-pill[data-status="awaiting_approval"] { color: #81500a; background: #fff8e6; border-color: #f3d58c; }
+  .status-pill[data-status="awaiting_approval"]::before { background: #d79016; }
+  .status-pill[data-status="published"] { color: #17653e; background: #eaf8f0; border-color: #b7e5c9; }
+  .status-pill[data-status="published"]::before { background: #25965b; }
+  .status-pill[data-status="failed"], .status-pill[data-status="expired"] { color: #9c2f2a; background: #fff0ef; border-color: #f0c2bf; }
+  .status-pill[data-status="failed"]::before, .status-pill[data-status="expired"]::before { background: #c2413b; }
+  .status-pill[data-status="writing"], .status-pill[data-status="publishing"] { color: #244e9b; background: #edf3ff; border-color: #c7d7fa; }
+  .status-pill[data-status="writing"]::before, .status-pill[data-status="publishing"]::before { background: var(--blue); animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 5px rgb(36 87 197 / 12%); } }
+  #countdown { margin: 0; color: var(--muted); font-size: .9rem; text-align: right; }
+  .progress-track { display: grid; grid-template-columns: repeat(3, 1fr); margin: 0 0 1.5rem; padding: 0; list-style: none; }
+  .progress-track li { position: relative; display: flex; align-items: center; gap: .55rem; color: #8793a7; font-size: .84rem; font-weight: 650; }
+  .progress-track li:not(:last-child)::after { height: 2px; margin: 0 .7rem; flex: 1; background: var(--line); content: ""; }
+  .progress-track .step-number { display: grid; width: 27px; height: 27px; flex: 0 0 27px; place-items: center; border: 1px solid #cbd5e1; border-radius: 50%; background: #fff; font-size: .78rem; }
+  .progress-track li.active { color: var(--blue); }
+  .progress-track li.active .step-number { color: #fff; background: var(--blue); border-color: var(--blue); }
+  .progress-track li.complete { color: #18804c; }
+  .progress-track li.complete .step-number { color: #fff; background: #22915a; border-color: #22915a; }
+  .story-heading { margin: 0 0 1rem; }
+  #title { margin: 0 0 .75rem; font-size: clamp(1.45rem, 3vw, 2rem); }
+  #story { max-height: 38rem; padding: clamp(1rem, 2.5vw, 1.5rem); overflow: auto; border: 1px solid #e8edf5; border-radius: 12px; background: #fbfcfe; color: #29364d; font-size: 1.04rem; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .review-panel { margin-top: 1.25rem; padding: 1.2rem; border: 1px solid #f0d99c; border-radius: 14px; background: #fffaf0; }
+  .review-panel h3 { margin-bottom: .25rem; }
+  .review-panel > p { margin-bottom: 1rem; color: #6f5b2b; font-size: .9rem; }
+  #feedback { min-height: 78px; }
+  .review-actions { display: flex; flex-wrap: wrap; gap: .65rem; margin-top: .75rem; }
+  .review-actions button { margin: 0; }
+  .review-actions .reject { border-color: #e5b7b3; color: #9f312c; }
+  .review-actions .reject:hover:not(:disabled) { background: #fff0ef; }
+  #download { margin-top: 1rem; }
+  details { margin-top: 1.25rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+  summary { width: fit-content; color: var(--blue); font-weight: 700; cursor: pointer; }
+  .revision-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-top: 1rem; }
+  .revision-columns h3 { font-size: .95rem; }
+  .revision-columns pre { max-height: 24rem; margin: 0; padding: .9rem; overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: #f7f9fc; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .timeline-card h2 { margin-bottom: .35rem; }
+  .timeline-card > p { color: var(--muted); }
+  .timeline { margin: 1rem 0 0; padding: 0 0 0 1.4rem; }
+  .timeline li { padding: .25rem 0 .55rem .35rem; }
+  .timeline time { display: block; margin-bottom: .15rem; color: var(--muted); font-size: .8rem; }
   [hidden] { display: none !important; }
-  @media (max-width: 620px) { .toolbar, .revision-columns { display: block; } }
+  @media (max-width: 680px) {
+    body { padding: 1.5rem .85rem 2.5rem; }
+    .recent-card { grid-template-columns: 1fr; align-items: stretch; }
+    .recent-actions { flex-wrap: wrap; }
+    #recent { grid-column: auto; }
+    .workflow-topline { align-items: flex-start; flex-direction: column; }
+    #countdown { text-align: left; }
+    .progress-track li { align-items: flex-start; flex-direction: column; gap: .35rem; font-size: .75rem; }
+    .progress-track li:not(:last-child)::after { position: absolute; top: 13px; left: 30px; right: 0; margin: 0; }
+    .revision-columns { grid-template-columns: 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
 </style>
 </head>
 <body>
-<h1>Story agent</h1>
-<section class="card">
+<header class="page-header">
+  <p class="eyebrow">Durable story workflow</p>
+  <h1>Story agent</h1>
+  <p class="page-subtitle">Create a draft, guide revisions with your feedback, and approve it when it’s ready to publish.</p>
+</header>
+<section class="card request-card" aria-labelledby="request-heading">
+  <div class="section-heading">
+    <div>
+      <h2 id="request-heading">What story should we write?</h2>
+      <p>Describe the story you want. You’ll review it before anything is published.</p>
+    </div>
+  </div>
   <label for="message">Story request</label>
-  <textarea id="message" rows="2">Write the season 1 story.</textarea>
-  <button id="send" class="primary">Write story</button>
-  <p id="notice" class="muted" role="status" aria-live="polite"></p>
+  <textarea id="message" rows="3" maxlength="2000">Write the season 1 story.</textarea>
+  <div class="request-actions">
+    <span id="request-count" class="muted" aria-live="polite">29 / 2000</span>
+    <button id="send" class="primary" type="button">Write story</button>
+  </div>
+  <div class="prompt-suggestions" aria-label="Example requests">
+    <span>Try an example:</span>
+    <button class="prompt-chip" type="button" data-prompt="Write a short, uplifting story about a new student finding a friend.">Finding friendship</button>
+    <button class="prompt-chip" type="button" data-prompt="Write a funny story about a magical classroom mishap and how the students solve it together.">A funny mishap</button>
+  </div>
+  <p id="notice" role="status" aria-live="polite"></p>
 </section>
 
 <section class="card" aria-labelledby="recent-heading">
-  <div class="toolbar">
-    <label id="recent-heading" for="recent">Recent workflows (saved in this browser)</label>
-    <button id="refresh" type="button">Refresh status</button>
-    <button id="remove" type="button">Remove from this browser</button>
+  <div class="recent-card">
+    <label id="recent-heading" for="recent">Recent workflows <span class="muted">(saved in this browser)</span></label>
+    <div class="recent-actions">
+      <button id="refresh" type="button">Refresh status</button>
+      <button id="remove" type="button">Remove from this browser</button>
+    </div>
+    <select id="recent" aria-label="Recent workflows"></select>
   </div>
-  <select id="recent" aria-label="Recent workflows"></select>
 </section>
 
 <section id="workflow" class="card" hidden>
-  <p id="status" role="status" aria-live="polite"></p>
+  <div class="workflow-topline">
+    <p id="status" class="status-pill" role="status" aria-live="polite"></p>
+    <p id="countdown" aria-live="polite"></p>
+  </div>
   <p id="error" role="alert"></p>
-  <p id="countdown" class="muted"></p>
-  <h2 id="title"></h2>
+  <ol class="progress-track" aria-label="Workflow progress">
+    <li id="progress-draft"><span class="step-number">1</span><span>Draft</span></li>
+    <li id="progress-review"><span class="step-number">2</span><span>Human review</span></li>
+    <li id="progress-publish"><span class="step-number">3</span><span>Publish</span></li>
+  </ol>
+  <div class="story-heading">
+    <h2 id="title"></h2>
+  </div>
   <div id="story"></div>
-  <div id="review-controls" hidden>
-    <label for="feedback">Feedback (used if you reject)</label>
-    <input id="feedback" placeholder="How should the next draft change?">
-    <button id="approve" class="primary">Approve and publish</button>
-    <button id="reject">Reject and revise</button>
+  <div id="review-controls" class="review-panel" hidden>
+    <h3>Your review</h3>
+    <p>Approve this draft to publish it, or leave feedback to request a revision.</p>
+    <label for="feedback">Feedback for the next draft <span class="muted">(optional)</span></label>
+    <textarea id="feedback" rows="2" placeholder="What should change or improve?"></textarea>
+    <div class="review-actions">
+      <button id="approve" class="primary" type="button">Approve and publish</button>
+      <button id="reject" class="reject" type="button">Reject and revise</button>
+    </div>
   </div>
   <button id="download" type="button" hidden>Download Markdown</button>
 
@@ -68,7 +191,7 @@
   </details>
 </section>
 
-<section id="timeline-panel" class="card" hidden>
+<section id="timeline-panel" class="card timeline-card" hidden>
   <h2>Workflow timeline</h2>
   <p class="muted">Browser-observed status changes for this workflow; refresh recovers current server state.</p>
   <ol id="timeline" class="timeline"></ol>
@@ -88,6 +211,11 @@ let busy = false;
 let retryDelay = 3000;
 let storageWarning = "";
 let noticeText = "";
+
+function updateRequestCount() {
+  $("request-count").textContent = `${$("message").value.length} / 2000`;
+  $("send").disabled = busy || !$("message").value.trim();
+}
 
 function readRuns() {
   try {
@@ -207,12 +335,33 @@ function renderCountdown() {
   $("reject").disabled = busy || remaining === 0;
 }
 
+function renderProgress(run) {
+  const status = run.status;
+  const draft = $("progress-draft");
+  const review = $("progress-review");
+  const publish = $("progress-publish");
+  for (const step of [draft, review, publish]) step.classList.remove("active", "complete");
+  const states = {
+    writing: [0, 0],
+    awaiting_approval: [1, 1],
+    publishing: [2, 2],
+    published: [3, 3],
+    expired: [1, 1],
+    failed: run.story ? [2, 1] : [0, 0],
+  };
+  const [active, completed] = states[status] || (run.story ? [1, 0] : [0, 0]);
+  [draft, review, publish].forEach((step, index) => {
+    if (index < completed) step.classList.add("complete");
+    else if (index === active) step.classList.add("active");
+  });
+}
+
 function render() {
   fillRecent();
   $("notice").textContent = noticeText || storageWarning;
   const run = selectedRun();
   $("workflow").hidden = !run;
-  $("send").disabled = busy;
+  updateRequestCount();
   $("refresh").disabled = busy || !run;
   $("remove").disabled = busy || !run;
   if (!run) {
@@ -222,13 +371,17 @@ function render() {
 
   const waiting = run.status === "awaiting_approval";
   $("status").textContent = `${run.status || "unknown"}${run.revision !== undefined ? ` · draft ${run.revision + 1}` : ""}`;
+  $("status").dataset.status = run.status || "unknown";
   $("error").textContent = run.fetch_error || run.error || storageWarning;
   $("title").textContent = run.story?.title || "";
   $("story").textContent = run.story?.story || "";
+  $("story").hidden = !run.story?.story;
+  $("title").hidden = !run.story?.title;
   $("review-controls").hidden = !waiting;
   $("approve").disabled = busy || !waiting;
   $("reject").disabled = busy || !waiting;
   $("download").hidden = !run.story || !["publishing", "published"].includes(run.status);
+  renderProgress(run);
   renderComparison(run);
   renderTimeline(run);
   renderCountdown();
@@ -288,7 +441,7 @@ function selectWorkflow(threadId) {
 }
 
 async function startWorkflow() {
-  if (busy) return;
+  if (busy || !$("message").value.trim()) return;
   busy = true;
   render();
   noticeText = "Starting a new workflow…";
@@ -372,6 +525,17 @@ function downloadStory() {
 }
 
 $("send").addEventListener("click", startWorkflow);
+$("message").addEventListener("input", updateRequestCount);
+document.querySelectorAll("[data-prompt]").forEach(button => {
+  button.addEventListener("click", () => {
+    $("message").value = button.dataset.prompt;
+    updateRequestCount();
+    $("message").focus();
+  });
+});
+$("message").addEventListener("keydown", event => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") startWorkflow();
+});
 $("approve").addEventListener("click", () => decide("approve"));
 $("reject").addEventListener("click", () => decide("reject"));
 $("download").addEventListener("click", downloadStory);

@@ -115,8 +115,11 @@ uses the `verify_output_step3_kind_<mode>.txt` prefix.
 
 The browser stores up to ten recent workflow snapshots in local storage, refreshes
 the selected workflow from the server on reload, and shows its current status,
-approval countdown, browser-observed timeline, and previous-draft comparison.
-Use **Download Markdown** to save the current approved or published draft.
+approval countdown, workflow progress, browser-observed timeline, and
+previous-draft comparison. Example request buttons, a live character count, and
+Ctrl+Enter make starting a story quicker. During review, the page clearly
+separates the feedback-for-revision action from approving and publishing. Use
+**Download published Markdown** to save the approved or published draft.
 Timeline entries are client-observed and therefore are not a durable server audit
 log. Removing an item clears only this browser's saved copy; it does not cancel
 the server-side workflow.
