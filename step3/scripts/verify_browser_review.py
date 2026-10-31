@@ -67,12 +67,12 @@ def verify_review_journey() -> None:
             page.get_by_role("button", name="Write story").click()
             page.locator("#status").wait_for()
             page.wait_for_function(
-                "() => document.querySelector('#status').textContent.includes('awaiting_approval')"
+                "() => document.querySelector('#status').dataset.status === 'awaiting_approval'"
             )
 
             first_story = page.locator("#story").inner_text()
             check("A draft is displayed and waiting for human review",
-                  bool(first_story.strip()) and "draft 1" in page.locator("#status").inner_text(),
+                  bool(first_story.strip()) and "draft 1" in page.locator("#status").inner_text().lower(),
                   page.locator("#status").inner_text())
             check("Workflow progress highlights the human review step",
                   page.locator("#progress-draft").get_attribute("class") == "complete"
@@ -88,8 +88,9 @@ def verify_review_journey() -> None:
             page.locator("#feedback").fill(feedback)
             page.get_by_role("button", name="Reject and revise").click()
             page.wait_for_function(
-                "() => { const s = document.querySelector('#status').textContent; "
-                "return s.includes('awaiting_approval') && s.includes('draft 2'); }"
+                "() => { const status = document.querySelector('#status'); "
+                "return status.dataset.status === 'awaiting_approval' "
+                "&& status.textContent.toLowerCase().includes('draft 2'); }"
             )
             revised_story = page.locator("#story").inner_text()
             check("Reject with feedback returns a revised draft",
@@ -108,13 +109,13 @@ def verify_review_journey() -> None:
 
             page.get_by_role("button", name="Approve and publish").click()
             page.wait_for_function(
-                "() => document.querySelector('#status').textContent.includes('published')",
+                "() => document.querySelector('#status').dataset.status === 'published'",
                 timeout=300_000,
             )
             final_status = page.locator("#status").inner_text()
             final_story = page.locator("#story").inner_text()
             check("Approval through the browser completes publication",
-                  "published" in final_status and final_story == revised_story,
+                  "published" in final_status.lower() and final_story == revised_story,
                   final_status)
             check("Workflow progress marks all steps complete after publication",
                   all("complete" in (page.locator(selector).get_attribute("class") or "")

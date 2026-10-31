@@ -370,7 +370,15 @@ function render() {
   }
 
   const waiting = run.status === "awaiting_approval";
-  $("status").textContent = `${run.status || "unknown"}${run.revision !== undefined ? ` · draft ${run.revision + 1}` : ""}`;
+  const statusLabels = {
+    awaiting_approval: "Awaiting approval",
+    writing: "Writing",
+    publishing: "Publishing",
+    published: "Published",
+    expired: "Expired",
+    failed: "Failed",
+  };
+  $("status").textContent = `${statusLabels[run.status] || run.status || "Unknown"}${run.revision !== undefined ? ` · Draft ${run.revision + 1}` : ""}`;
   $("status").dataset.status = run.status || "unknown";
   $("error").textContent = run.fetch_error || run.error || storageWarning;
   $("title").textContent = run.story?.title || "";
