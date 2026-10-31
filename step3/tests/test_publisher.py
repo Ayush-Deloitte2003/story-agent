@@ -120,10 +120,21 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(list(publisher._load_state()["attempts"].values()), [1])
 
     def test_approval_events_are_revision_scoped(self):
-        from app.approval import approval_event_name
+        from app.approval import DecisionClaims, approval_event_name
 
         self.assertEqual(approval_event_name(0), "approval-0")
         self.assertEqual(approval_event_name(1), "approval-1")
+
+    def test_simultaneous_decisions_allow_one_claim_per_revision(self):
+        from app.approval import DecisionClaims
+
+        claims = DecisionClaims()
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            results = list(pool.map(lambda _: claims.claim("thread-1", 0), range(64)))
+
+        self.assertEqual(sum(results), 1)
+        claims.reconcile("thread-1", 1)
+        self.assertTrue(claims.claim("thread-1", 1))
 
 
 if __name__ == "__main__":

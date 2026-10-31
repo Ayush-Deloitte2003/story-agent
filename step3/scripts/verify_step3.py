@@ -12,10 +12,12 @@ Options: --url http://127.0.0.1:8000
 """
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
 import sys
+from threading import Barrier
 import time
 from pathlib import Path
 from urllib import error, request
@@ -26,7 +28,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument(
     "mode", nargs="?", default="run",
     choices=[
-        "run", "start", "resume", "publishing-start", "publishing-resume", "redis-start",
+        "run", "race", "start", "resume", "publishing-start", "publishing-resume", "redis-start",
         "redis-resume", "expiry-start", "expiry-resume", "exhaust",
     ],
 )
@@ -197,6 +199,56 @@ elif args.mode == "publishing-start":
             }),
             encoding="utf-8",
         )
+
+elif args.mode == "race":
+    code, draft = call("POST", "/chat", {"message": "Write a brief season 1 story about a new student."})
+    tid = draft.get("thread_id")
+    check("Race-test workflow waits for approval",
+          code == 200 and draft.get("status") == "awaiting_approval",
+          f"HTTP {code}, status={draft.get('status')}")
+    if draft.get("status") == "awaiting_approval":
+        revision = draft.get("revision", 0)
+        barrier = Barrier(2)
+
+        def submit_decision(decision: str) -> tuple[int, dict]:
+            barrier.wait()
+            return call("POST", f"/chat/{tid}/decision", {
+                "decision": decision, "expected_revision": revision
+            })
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            approve_future = pool.submit(submit_decision, "approve")
+            reject_future = pool.submit(submit_decision, "reject")
+            approve_result = approve_future.result()
+            reject_result = reject_future.result()
+
+        results = {"approve": approve_result, "reject": reject_result}
+        accepted = [decision for decision, (status_code, _) in results.items() if status_code == 200]
+        refused = [(decision, body.get("detail")) for decision, (status_code, body) in results.items()
+                   if status_code == 409]
+        check("Exactly one simultaneous approve/reject decision is accepted",
+              len(accepted) == 1 and len(refused) == 1,
+              f"accepted={accepted}, refused={refused}")
+
+        if len(accepted) == 1 and len(refused) == 1:
+            winner = accepted[0]
+            _, state = call("GET", f"/chat/{tid}")
+            if winner == "reject":
+                check("The accepted rejection creates the next draft revision",
+                      state.get("status") == "awaiting_approval" and state.get("revision") == revision + 1,
+                      f"status={state.get('status')}, revision={state.get('revision')}")
+                if state.get("status") == "awaiting_approval":
+                    call("POST", f"/chat/{tid}/decision", {
+                        "decision": "approve", "expected_revision": state.get("revision", 0)
+                    })
+            else:
+                check("The accepted approval starts publication",
+                      state.get("status") in ("publishing", "published"),
+                      f"status={state.get('status')}")
+            done = wait_until_done(tid)
+            check("The winning decision leads to one successful publication",
+                  done.get("status") == "published" and attempt_of(done) == 8,
+                  f"status={done.get('status')}, attempt={attempt_of(done)}")
 
 elif args.mode in ("resume", "redis-resume"):
     if not PENDING.exists():

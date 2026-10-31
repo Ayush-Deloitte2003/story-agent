@@ -67,6 +67,9 @@ jobs:
           sleep 5
           python scripts/verify_step3.py run
 
+      - name: Concurrent approval decision race
+        run: python scripts/verify_step3.py race
+
       - name: Restart test (delete the app pod)
         run: |
           pkill -f "kubectl port-forward" || true

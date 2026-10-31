@@ -126,13 +126,20 @@ The manual `step3-kind` GitHub Actions workflow uses Python 3.12, Dapr CLI
 dependencies to versions resolved by the successful Kind run; Docker installs
 the complete transitive set from `requirements-kind.lock`, captured from that
 same run. The workflow tests publisher persistence/idempotency and stale
-revision decisions, checks the exact successful attempt number and Redis
+revision decisions, races simultaneous approve/reject requests and requires
+exactly one to be accepted, checks the exact successful attempt number and Redis
 workflow key prefix, compares the downloaded published Markdown byte-for-byte
 with the approved draft, and then restarts the publisher to check its volume.
 It also tests app-pod replacement, Redis restart recovery, expiry while the app
 is down, and exhausted publish retries. The GitHub job summary and uploaded
 `step3-kind-reports` artifact include verification reports and the published
 Markdown.
+
+Decision submission is serialized within the single FastAPI process used by
+the current local and Kind deployments. This prevents two simultaneous
+requests to that process from raising conflicting decisions for the same
+revision. It is not a distributed lock for a future multi-replica API
+deployment.
 
 Only the earlier Kind execution at commit `3754167` is a completed cluster
 verification. Changes in progress must be run through `step3-kind` before they
