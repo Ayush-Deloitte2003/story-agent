@@ -130,6 +130,10 @@ revision decisions, races simultaneous approve/reject requests and requires
 exactly one to be accepted, checks the exact successful attempt number and Redis
 workflow key prefix, compares the downloaded published Markdown byte-for-byte
 with the approved draft, and then restarts the publisher to check its volume.
+It also runs a Chromium browser journey through the actual reviewer page:
+create a draft, reject with feedback, inspect the revision comparison, approve
+the new draft, wait for publication, and verify the downloaded Markdown and
+browser-observed timeline.
 It also tests app-pod replacement, Redis restart recovery, expiry while the app
 is down, and exhausted publish retries. The GitHub job summary and uploaded
 `step3-kind-reports` artifact include verification reports and the published

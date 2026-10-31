@@ -67,6 +67,14 @@ jobs:
           sleep 5
           python scripts/verify_step3.py run
 
+      - name: Install browser test dependencies
+        run: |
+          python -m pip install -r requirements-browser-test.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Browser-driven reviewer journey
+        run: python scripts/verify_browser_review.py
+
       - name: Concurrent approval decision race
         run: python scripts/verify_step3.py race
 
