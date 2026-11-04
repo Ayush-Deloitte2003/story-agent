@@ -70,6 +70,17 @@ There is deliberately no consumer for that topic yet, so dead-lettered events
 remain for operator inspection rather than being silently acknowledged; the
 Agent Inbox phase can add a durable review/notification consumer.
 
+The same topic also routes `story.quality-review.requested` to an independent
+`story_quality_review_workflow`. Its event data contains a `title`, `story`, and
+optional original `request`. The workflow runs a story-quality reviewer and
+returns a validated score, recommendation, strengths, issues, and suggestions.
+Submit one through `POST /webhooks/story-quality-review-requested` and check its
+status at `GET /events/quality-review/{event_id}?source={source}`. Reuse the
+same event ID on retries; its deterministic workflow identity is separate from
+the writing workflow. A `ready` recommendation is advisory only and never
+replaces human approval or triggers publishing. The review activity is
+side-effect-free; Dapr retries transient failures up to three total attempts.
+
 For example, submit a webhook to the gateway:
 
 ```json
@@ -84,6 +95,23 @@ For example, submit a webhook to the gateway:
 The gateway wraps this in a `story.requested` CloudEvent and publishes it
 through its local Dapr sidecar. A successful response means Dapr accepted the
 event; it does not mean the story has already been drafted.
+
+To request an independent quality review, submit the story and a new event
+identity to `POST /webhooks/story-quality-review-requested`:
+
+```json
+{
+  "id": "review-123",
+  "source": "story-service",
+  "title": "The Lantern",
+  "story": "Mina found a lantern and returned it to the neighbor who had lost it.",
+  "request": "Write a warm story about helping a neighbor."
+}
+```
+
+Poll `GET /events/quality-review/review-123?source=story-service` for the
+durable review result. This separate event does not change any story workflow
+or publish content.
 
 In the current Kind setup, Dapr Pub/Sub and workflow state use the same Redis
 service for a small demonstration. Production scale should use an appropriately
@@ -213,6 +241,7 @@ Actions secret.
 | `app/agent.py` | Deep agent (skill + LLM) that drafts the story; MCP client for publishing |
 | `app/main.py` | Webhook gateway, Pub/Sub subscriber, and FastAPI workflow endpoints |
 | `app/events.py` | CloudEvent validation and stable event-to-workflow IDs |
+| `app/quality_review.py` | Strict validation for the specialist review result |
 | `app/index.html` | Reviewer dashboard: recent workflows, timeline, countdown, revision comparison, downloads |
 | `mcp_server/publisher.py` | Flaky MCP server: each story fails 7 times, then publishes |
 | `skills/hp-season-1/SKILL.md` | The skill the agent follows to write the story |
@@ -222,7 +251,7 @@ Actions secret.
 | `k8s/` | Kind manifests and `deploy-kind.ps1` |
 | `Dockerfile` | One image for the app and the publisher |
 | `scripts/verify_step3.py` | PASS/FAIL checks against the running app |
-| `scripts/verify_event_intake.py` | Kind check for webhook intake, duplicate deliveries, human approval, and publication |
+| `scripts/verify_event_intake.py` | Kind check for story and quality-review event delivery, deduplication, approval, and publication |
 
 ## Settings (`.env`)
 

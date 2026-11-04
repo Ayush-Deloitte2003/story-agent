@@ -92,11 +92,61 @@ def main():
         completed = request_json(f"{APP_URL}/chat/{thread_id}")
         if completed["status"] == "published":
             print("[PASS] Human approval resumed the event-triggered workflow through publication")
-            return
+            break
         if completed["status"] in ("failed", "expired"):
             raise RuntimeError(f"Event workflow did not publish after approval: {completed}")
         time.sleep(2)
-    raise TimeoutError("Approved event workflow did not publish within 300 seconds.")
+    else:
+        raise TimeoutError("Approved event workflow did not publish within 300 seconds.")
+
+    review_event_id = str(uuid.uuid4())
+    review_source = "step3-quality-review-verification"
+    review_data = {
+        "id": review_event_id,
+        "source": review_source,
+        "title": "The Lantern on Birch Street",
+        "story": (
+            "Mina found a lantern outside the library. She carried it home, "
+            "then returned it when her neighbor came looking. They walked back "
+            "together and discovered the library's lost-and-found box."
+        ),
+        "request": "Write a short, warm story about helping a neighbor.",
+    }
+    accepted = request_json(f"{APP_URL}/webhooks/story-quality-review-requested", review_data)
+    if accepted.get("status") != "ACCEPTED":
+        raise AssertionError(f"Quality-review webhook did not accept the event: {accepted}")
+
+    encoded_source = urllib.parse.urlencode({"source": review_source})
+    review_status_url = (
+        f"{APP_URL}/events/quality-review/{urllib.parse.quote(review_event_id)}?{encoded_source}"
+    )
+    review_status = None
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        review_status = request_json(review_status_url)
+        if review_status is not None and review_status["status"] in ("reviewed", "failed"):
+            break
+        time.sleep(2)
+    if review_status is None or review_status["status"] != "reviewed":
+        raise RuntimeError(f"Quality-review workflow did not complete successfully: {review_status}")
+
+    result = review_status.get("review")
+    if not isinstance(result, dict):
+        raise AssertionError(f"Quality-review workflow returned no structured review: {review_status}")
+    required_fields = {"score", "recommendation", "summary", "strengths", "issues", "suggestions"}
+    if not required_fields.issubset(result):
+        raise AssertionError(f"Quality-review result is missing fields: {result}")
+    if result["recommendation"] not in ("ready", "revise") or not 1 <= result["score"] <= 5:
+        raise AssertionError(f"Quality-review result has invalid decision fields: {result}")
+    print(f"[PASS] Separate quality-review event completed durable workflow {review_status['thread_id']}")
+    print("[PASS] Quality review returns structured advisory output without changing human approval")
+
+    for _ in range(3):
+        request_json(f"{APP_URL}/webhooks/story-quality-review-requested", review_data)
+    duplicate_review_status = request_json(review_status_url)
+    if duplicate_review_status is None or duplicate_review_status["thread_id"] != review_status["thread_id"]:
+        raise AssertionError("Redelivered quality-review event did not resolve to its original workflow.")
+    print("[PASS] Repeated quality-review CloudEvents resolve to the original workflow")
 
 
 if __name__ == "__main__":

@@ -18,13 +18,19 @@ from datetime import timedelta
 
 import dapr.ext.workflow as wf
 
-from app.agent import draft_story, publish_via_mcp
+from app.agent import draft_story, publish_via_mcp, review_story_quality
 from app.approval import approval_event_name
 
 log = logging.getLogger("story-agent")
 
 # Writing calls an LLM, which can hit transient errors too.
 WRITE_RETRY = wf.RetryPolicy(
+    first_retry_interval=timedelta(seconds=2),
+    max_number_of_attempts=3,
+    backoff_coefficient=2.0,
+)
+
+QUALITY_REVIEW_RETRY = wf.RetryPolicy(
     first_retry_interval=timedelta(seconds=2),
     max_number_of_attempts=3,
     backoff_coefficient=2.0,
@@ -84,10 +90,28 @@ def story_workflow(ctx: wf.DaprWorkflowContext, inp: dict):
         return {"status": "published", "story": draft, "result": result}
 
 
+@runtime.workflow(name="story_quality_review_workflow")
+def story_quality_review_workflow(ctx: wf.DaprWorkflowContext, inp: dict):
+    _status(ctx, "reviewing", title=inp["title"])
+    result = yield ctx.call_activity(
+        quality_review_story,
+        input=inp,
+        retry_policy=QUALITY_REVIEW_RETRY,
+    )
+    _status(ctx, "reviewed", title=inp["title"], review=result)
+    return {"status": "reviewed", "title": inp["title"], "review": result}
+
+
 @runtime.activity(name="write_story")
 async def write_story(ctx: wf.WorkflowActivityContext, inp: dict) -> dict:
     log.info("write_story (revision %d)", len(inp["revisions"]))
     return await draft_story(inp["request"], inp["revisions"])
+
+
+@runtime.activity(name="quality_review_story")
+async def quality_review_story(ctx: wf.WorkflowActivityContext, inp: dict) -> dict:
+    log.info("quality review started for %s", inp["title"])
+    return await review_story_quality(inp["title"], inp["story"], inp.get("request", ""))
 
 
 @runtime.activity(name="publish_story")

@@ -34,8 +34,13 @@ from pydantic import BaseModel, Field  # noqa: E402
 
 from app.agent import mcp_url  # noqa: E402
 from app.approval import DecisionClaims, approval_event_name  # noqa: E402
-from app.events import parse_story_requested_event, workflow_id_for_event  # noqa: E402
-from app.workflow import runtime, story_workflow  # noqa: E402
+from app.events import (  # noqa: E402
+    parse_story_quality_review_event,
+    parse_story_requested_event,
+    workflow_id_for_event,
+    workflow_id_for_quality_review_event,
+)
+from app.workflow import runtime, story_quality_review_workflow, story_workflow  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("story-agent")
@@ -79,6 +84,14 @@ class StoryRequestedWebhook(BaseModel):
     source: str = Field(min_length=1, max_length=512)
     message: str = Field(min_length=1)
     approval_timeout_seconds: float | None = Field(None, gt=0)
+
+
+class StoryQualityReviewWebhook(BaseModel):
+    id: str = Field(min_length=1, max_length=256)
+    source: str = Field(min_length=1, max_length=512)
+    title: str = Field(min_length=1, max_length=500)
+    story: str = Field(min_length=1, max_length=20000)
+    request: str = Field("", max_length=2000)
 
 
 class DecisionRequest(BaseModel):
@@ -190,16 +203,45 @@ async def webhook_story_requested(req: StoryRequestedWebhook):
     return {"status": "ACCEPTED", "event_id": req.id, "source": req.source}
 
 
+@app.post("/webhooks/story-quality-review-requested", status_code=202, include_in_schema=False)
+async def webhook_story_quality_review_requested(req: StoryQualityReviewWebhook):
+    event = {
+        "specversion": "1.0",
+        "id": req.id,
+        "source": req.source,
+        "type": "story.quality-review.requested",
+        "datacontenttype": "application/json",
+        "data": {"title": req.title, "story": req.story, "request": req.request},
+    }
+    try:
+        parse_story_quality_review_event(event)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    try:
+        await asyncio.to_thread(_publish_cloud_event, event)
+    except RuntimeError as exc:
+        log.exception("Quality-review event %s/%s could not be published", req.source, req.id)
+        raise HTTPException(503, str(exc)) from exc
+    return {"status": "ACCEPTED", "event_id": req.id, "source": req.source}
+
+
 @app.get("/dapr/subscribe", include_in_schema=False)
 async def dapr_subscriptions():
     return [{
         "pubsubname": "pubsub",
         "topic": "story-events",
         "routes": {
-            "rules": [{
-                "match": 'event.type == "story.requested"',
-                "path": "/events/story-requested",
-            }],
+            "rules": [
+                {
+                    "match": 'event.type == "story.requested"',
+                    "path": "/events/story-requested",
+                },
+                {
+                    "match": 'event.type == "story.quality-review.requested"',
+                    "path": "/events/story-quality-review-requested",
+                },
+            ],
             "default": "/events/unhandled",
         },
         "deadLetterTopic": "story-events-dead",
@@ -235,6 +277,35 @@ async def story_requested(event: object = Body(...)):
     return {"status": "SUCCESS", "thread_id": thread_id}
 
 
+@app.post("/events/story-quality-review-requested", include_in_schema=False)
+async def story_quality_review_requested(event: object = Body(...)):
+    try:
+        source, event_id, workflow_input = parse_story_quality_review_event(event)
+    except ValueError as exc:
+        log.warning("Dropping invalid quality-review event: %s", exc)
+        return {"status": "DROP", "message": str(exc)}
+
+    workflow_id = workflow_id_for_quality_review_event(source, event_id)
+    try:
+        await asyncio.to_thread(
+            client.schedule_new_workflow,
+            story_quality_review_workflow,
+            input=workflow_input,
+            instance_id=workflow_id,
+        )
+    except Exception:
+        existing = await asyncio.to_thread(client.get_workflow_state, workflow_id, fetch_payloads=False)
+        if existing is None:
+            log.exception("Could not start quality-review workflow for event %s/%s", source, event_id)
+            return {"status": "RETRY"}
+        log.info("Acknowledging redelivered quality-review event %s/%s as workflow %s",
+                 source, event_id, workflow_id)
+    else:
+        log.info("Started quality-review workflow %s from event %s/%s", workflow_id, source, event_id)
+
+    return {"status": "SUCCESS", "thread_id": workflow_id}
+
+
 @app.post("/events/unhandled", include_in_schema=False)
 async def unhandled_event(event: object = Body(...)):
     event_type = event.get("type") if isinstance(event, dict) else None
@@ -248,6 +319,15 @@ async def event_status(event_id: str, source: str):
     view = await asyncio.to_thread(_view, thread_id)
     if view is None:
         raise HTTPException(404, "No workflow found for this event.")
+    return view
+
+
+@app.get("/events/quality-review/{event_id}", include_in_schema=False)
+async def quality_review_event_status(event_id: str, source: str):
+    workflow_id = workflow_id_for_quality_review_event(source, event_id)
+    view = await asyncio.to_thread(_view, workflow_id)
+    if view is None:
+        raise HTTPException(404, "No quality-review workflow found for this event.")
     return view
 
 
