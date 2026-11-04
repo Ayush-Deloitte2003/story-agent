@@ -42,6 +42,46 @@ Approval events are revision-specific. The existing decision endpoint also
 accepts an optional `expected_revision`; stale browser decisions receive HTTP
 409, while existing clients that omit the field retain the original behavior.
 
+### Event-triggered workflow intake
+
+The Kind deployment also subscribes to Dapr Pub/Sub topic `story-events`. A
+CloudEvent with type `story.requested` is routed to the existing
+`story_workflow`; other event types go to a drop route. The event `data` must
+contain a non-empty `message`, with an optional positive
+`approval_timeout_seconds`. The workflow still drafts first and waits for the
+same human approval before publication.
+
+The workflow ID is derived deterministically from the CloudEvent `source` and
+`id`. Dapr Pub/Sub delivers at least once, so a redelivered event maps to the
+same workflow ID instead of intentionally starting a second workflow. If
+scheduling fails before the workflow is visible, the subscriber returns
+`RETRY`; invalid story events return `DROP`. Query an event-triggered workflow
+with `GET /events/{event_id}?source={source}`. This is event-to-workflow
+deduplication, not general multi-replica coordination or an exactly-once
+guarantee.
+
+For example, publish a CloudEvent through the Dapr sidecar:
+
+```json
+{
+  "specversion": "1.0",
+  "id": "booking-123",
+  "source": "booking-service",
+  "type": "story.requested",
+  "datacontenttype": "application/json",
+  "data": {
+    "message": "Write a story about a lighthouse.",
+    "approval_timeout_seconds": 86400
+  }
+}
+```
+
+In the current Kind setup, Dapr Pub/Sub and workflow state use the same Redis
+service for a small demonstration. Production scale should use an appropriately
+sized broker and state store, with independent capacity, monitoring, and failure
+policies. Local slim-mode setup does not configure a broker; event intake is
+currently enabled and integration-tested in Kind.
+
 ## Option 1: run locally with Dapr (quickest)
 
 Needs Docker Desktop running and the Dapr CLI (`winget install Dapr.CLI`).
@@ -165,6 +205,7 @@ Actions secret.
 | `mcp_server/publisher.py` | Flaky MCP server: each story fails 7 times, then publishes |
 | `skills/hp-season-1/SKILL.md` | The skill the agent follows to write the story |
 | `dapr/components/statestore.yaml` | Local state store (SQLite) for `dapr run` |
+| `k8s/pubsub.yaml` | Redis-backed Dapr Pub/Sub component for event-triggered workflows |
 | `k8s/` | Kind manifests and `deploy-kind.ps1` |
 | `Dockerfile` | One image for the app and the publisher |
 | `scripts/verify_step3.py` | PASS/FAIL checks against the running app |

@@ -57,15 +57,18 @@ jobs:
         run: |
           test -n "$OPENAI_API_KEY" || { echo "Repository secret OPENAI_API_KEY is not set"; exit 1; }
           kubectl create secret generic story-agent-env --from-literal=OPENAI_API_KEY="$OPENAI_API_KEY"
-          kubectl apply -f k8s/redis.yaml -f k8s/statestore.yaml -f k8s/publisher.yaml -f k8s/story-agent.yaml
+          kubectl apply -f k8s/redis.yaml -f k8s/statestore.yaml -f k8s/pubsub.yaml -f k8s/publisher.yaml -f k8s/story-agent.yaml
           for d in redis publisher story-agent; do kubectl rollout status "deployment/$d" --timeout=300s; done
           kubectl get pods
 
       - name: Verify (retries, expiry, 410)
         run: |
           kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          app_pod=$(kubectl get pod -l app=story-agent -o jsonpath='{.items[0].metadata.name}')
+          kubectl port-forward "$app_pod" 3500:3500 >/tmp/dapr-pf.log 2>&1 &
           sleep 5
           python scripts/verify_step3.py run
+          python scripts/verify_event_intake.py
 
       - name: Install browser test dependencies
         run: |

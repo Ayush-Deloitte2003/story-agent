@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field  # noqa: E402
 
 from app.agent import mcp_url  # noqa: E402
 from app.approval import DecisionClaims, approval_event_name  # noqa: E402
+from app.events import parse_story_requested_event, workflow_id_for_event  # noqa: E402
 from app.workflow import runtime, story_workflow  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -137,6 +138,66 @@ async def chat(req: ChatRequest):
     )
     log.info("Started story workflow %s (approval window %.0fs)", thread_id, timeout)
     return await _wait_for(thread_id, lambda v: v["status"] not in ("writing",))
+
+
+@app.get("/dapr/subscribe", include_in_schema=False)
+async def dapr_subscriptions():
+    return [{
+        "pubsubname": "pubsub",
+        "topic": "story-events",
+        "routes": {
+            "rules": [{
+                "match": 'event.type == "story.requested"',
+                "path": "/events/story-requested",
+            }],
+            "default": "/events/unhandled",
+        },
+    }]
+
+
+@app.post("/events/story-requested", include_in_schema=False)
+async def story_requested(event: object):
+    try:
+        source, event_id, workflow_input = parse_story_requested_event(event)
+    except ValueError as exc:
+        log.warning("Dropping invalid story event: %s", exc)
+        return {"status": "DROP", "message": str(exc)}
+
+    thread_id = workflow_id_for_event(source, event_id)
+    workflow_input.setdefault("approval_timeout_seconds", APPROVAL_TIMEOUT_HOURS * 3600)
+    try:
+        await asyncio.to_thread(
+            client.schedule_new_workflow,
+            story_workflow,
+            input=workflow_input,
+            instance_id=thread_id,
+        )
+    except Exception:
+        existing = await asyncio.to_thread(client.get_workflow_state, thread_id, fetch_payloads=False)
+        if existing is None:
+            log.exception("Could not start workflow for event %s/%s", source, event_id)
+            return {"status": "RETRY"}
+        log.info("Acknowledging redelivered event %s/%s as workflow %s", source, event_id, thread_id)
+    else:
+        log.info("Started workflow %s from event %s/%s", thread_id, source, event_id)
+
+    return {"status": "SUCCESS", "thread_id": thread_id}
+
+
+@app.post("/events/unhandled", include_in_schema=False)
+async def unhandled_event(event: object):
+    event_type = event.get("type") if isinstance(event, dict) else None
+    log.warning("Dropping event with no matching story route: %s", event_type)
+    return {"status": "DROP"}
+
+
+@app.get("/events/{event_id}", include_in_schema=False)
+async def event_status(event_id: str, source: str):
+    thread_id = workflow_id_for_event(source, event_id)
+    view = await asyncio.to_thread(_view, thread_id)
+    if view is None:
+        raise HTTPException(404, "No workflow found for this event.")
+    return view
 
 
 @app.post("/chat/{thread_id}/decision")
