@@ -50,7 +50,8 @@ def parse_story_requested_event(event: object) -> tuple[str, str, dict]:
 def workflow_id_for_event(source: str, event_id: str) -> str:
     """Map a CloudEvent identity to a stable, Dapr-safe workflow instance ID."""
     if (not isinstance(source, str) or not source.strip()
-            or not isinstance(event_id, str) or not event_id.strip()):
+            or len(source) > 512
+            or not isinstance(event_id, str) or not event_id.strip() or len(event_id) > 256):
         raise ValueError("CloudEvent source and id must be non-empty.")
     identity = f"{source}\0{event_id}"
     return f"story-event-{uuid.uuid5(_EVENT_NAMESPACE, identity)}"

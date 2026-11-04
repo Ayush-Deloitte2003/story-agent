@@ -56,6 +56,17 @@ class EventTests(unittest.TestCase):
             with self.subTest(event=event), self.assertRaises(ValueError):
                 parse_story_requested_event(event)
 
+    def test_invalid_identity_is_rejected_for_workflow_id(self):
+        for source, event_id in (
+            ("", "id"),
+            ("source", " "),
+            (None, "id"),
+            ("s" * 513, "id"),
+            ("source", "i" * 257),
+        ):
+            with self.subTest(source=source, event_id=event_id), self.assertRaises(ValueError):
+                workflow_id_for_event(source, event_id)
+
 
 if __name__ == "__main__":
     unittest.main()

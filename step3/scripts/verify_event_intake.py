@@ -7,9 +7,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 
-DAPR_URL = os.getenv("DAPR_HTTP_URL", "http://127.0.0.1:3500").rstrip("/")
 APP_URL = os.getenv("APP_URL", "http://127.0.0.1:8000").rstrip("/")
 
 
@@ -31,19 +31,6 @@ def request_json(url, payload=None):
     return json.loads(content) if content else None
 
 
-def publish_event(event):
-    publish_url = f"{DAPR_URL}/v1.0/publish/pubsub/story-events"
-    request = urllib.request.Request(
-        publish_url,
-        data=json.dumps(event).encode("utf-8"),
-        headers={"Content-Type": "application/cloudevents+json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        if response.status not in (200, 202, 204):
-            raise RuntimeError(f"Publishing event returned HTTP {response.status}")
-
-
 def main():
     event_id = str(uuid.uuid4())
     source = "step3-event-verification"
@@ -55,7 +42,14 @@ def main():
         "datacontenttype": "application/json",
         "data": {"message": "Write the season 1 story."},
     }
-    publish_event(event)
+    webhook = {
+        "id": event_id,
+        "source": source,
+        "message": event["data"]["message"],
+    }
+    accepted = request_json(f"{APP_URL}/webhooks/story-requested", webhook)
+    if accepted.get("status") != "ACCEPTED":
+        raise AssertionError(f"Webhook gateway did not accept the event: {accepted}")
 
     encoded_source = urllib.parse.urlencode({"source": source})
     status_url = f"{APP_URL}/events/{urllib.parse.quote(event_id)}?{encoded_source}"
@@ -77,11 +71,17 @@ def main():
     thread_id = status["thread_id"]
     print(f"[PASS] Dapr Pub/Sub event started workflow {thread_id} and reached human review")
 
-    publish_event(event)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        repeated = list(pool.map(
+            lambda _: request_json(f"{APP_URL}/webhooks/story-requested", webhook),
+            range(4),
+        ))
+    if any(response.get("status") != "ACCEPTED" for response in repeated):
+        raise AssertionError(f"Webhook did not accept repeated event IDs: {repeated}")
     duplicate_status = request_json(status_url)
     if duplicate_status is None or duplicate_status["thread_id"] != thread_id:
         raise AssertionError("Redelivered event did not resolve to its original workflow.")
-    print("[PASS] Redelivering the CloudEvent resolves to the same workflow")
+    print("[PASS] Concurrent redeliveries of the CloudEvent resolve to the same workflow")
 
     request_json(f"{APP_URL}/chat/{thread_id}/decision", {
         "decision": "approve",

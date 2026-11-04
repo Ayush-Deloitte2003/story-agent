@@ -93,7 +93,7 @@ async def write_story(ctx: wf.WorkflowActivityContext, inp: dict) -> dict:
 @runtime.activity(name="publish_story")
 async def publish_story(ctx: wf.WorkflowActivityContext, draft: dict) -> str:
     try:
-        result = await publish_via_mcp(draft["title"], draft["story"])
+        result = await publish_via_mcp(draft["title"], draft["story"], idempotency_key=ctx.workflow_id)
     except Exception as exc:
         log.warning("publish_story failed, Dapr will retry: %s", exc)
         raise

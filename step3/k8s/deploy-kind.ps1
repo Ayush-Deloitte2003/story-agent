@@ -50,7 +50,7 @@ foreach ($line in Get-Content .env) {
 kubectl create secret generic story-agent-env @literals --dry-run=client -o yaml | kubectl apply -f -; Check "secret"
 
 Step "Applying manifests"
-kubectl apply -f k8s/redis.yaml -f k8s/statestore.yaml -f k8s/pubsub.yaml -f k8s/publisher.yaml -f k8s/story-agent.yaml; Check "kubectl apply"
+kubectl apply -f k8s/redis.yaml -f k8s/statestore.yaml -f k8s/pubsub.yaml -f k8s/resiliency.yaml -f k8s/publisher.yaml -f k8s/story-agent.yaml; Check "kubectl apply"
 kubectl rollout restart deployment/publisher deployment/story-agent | Out-Null
 foreach ($d in "redis", "publisher", "story-agent") {
     kubectl rollout status "deployment/$d" --timeout=300s; Check "rollout of $d (see: kubectl describe pod -l app=$d)"

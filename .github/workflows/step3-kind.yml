@@ -57,7 +57,7 @@ jobs:
         run: |
           test -n "$OPENAI_API_KEY" || { echo "Repository secret OPENAI_API_KEY is not set"; exit 1; }
           kubectl create secret generic story-agent-env --from-literal=OPENAI_API_KEY="$OPENAI_API_KEY"
-          kubectl apply -f k8s/redis.yaml -f k8s/statestore.yaml -f k8s/pubsub.yaml -f k8s/publisher.yaml -f k8s/story-agent.yaml
+          kubectl apply -f k8s/redis.yaml -f k8s/statestore.yaml -f k8s/pubsub.yaml -f k8s/resiliency.yaml -f k8s/publisher.yaml -f k8s/story-agent.yaml
           for d in redis publisher story-agent; do kubectl rollout status "deployment/$d" --timeout=300s; done
           kubectl get pods
 

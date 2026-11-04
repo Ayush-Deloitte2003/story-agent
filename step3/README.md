@@ -32,11 +32,12 @@ The deep agent decides *what* to publish (it proposes the `publish_story`
 call); Dapr owns the waiting and the retried execution of that call.
 
 The publisher stores its attempt ledger and Markdown output on a Kubernetes
-PersistentVolumeClaim. Attempts and published-result records are atomically
-replaced, and a publication uses a stable content-derived filename. A retry
-after a successful publish returns the saved result instead of creating a
-second file. This protects the publisher's filesystem side effects from a lost
-response; it is not a claim of end-to-end exactly-once delivery.
+PersistentVolumeClaim. The workflow passes its stable workflow ID as the MCP
+idempotency key. The publisher stores a content fingerprint with the result,
+returns the saved result for a retry with matching content, and rejects reuse
+of that key for different content. Attempts and published-result records are
+atomically replaced. This protects the publisher's filesystem side effects
+from a lost response; it is not a claim of end-to-end exactly-once delivery.
 
 Approval events are revision-specific. The existing decision endpoint also
 accepts an optional `expected_revision`; stale browser decisions receive HTTP
@@ -55,32 +56,42 @@ The workflow ID is derived deterministically from the CloudEvent `source` and
 `id`. Dapr Pub/Sub delivers at least once, so a redelivered event maps to the
 same workflow ID instead of intentionally starting a second workflow. If
 scheduling fails before the workflow is visible, the subscriber returns
-`RETRY`; invalid story events return `DROP`. Query an event-triggered workflow
-with `GET /events/{event_id}?source={source}`. This is event-to-workflow
+`RETRY`; invalid story events return `DROP`. The `POST /webhooks/story-requested`
+gateway accepts an event ID, source, and message, then publishes a CloudEvent
+through the local Dapr sidecar. Callers must reuse the same ID when retrying
+their webhook request. Query an event-triggered workflow with
+`GET /events/{event_id}?source={source}`. This is event-to-workflow
 deduplication, not general multi-replica coordination or an exactly-once
 guarantee.
 
-For example, publish a CloudEvent through the Dapr sidecar:
+The subscription has a bounded exponential delivery retry policy and routes
+messages that still cannot be delivered to the `story-events-dead` topic.
+There is deliberately no consumer for that topic yet, so dead-lettered events
+remain for operator inspection rather than being silently acknowledged; the
+Agent Inbox phase can add a durable review/notification consumer.
+
+For example, submit a webhook to the gateway:
 
 ```json
 {
-  "specversion": "1.0",
   "id": "booking-123",
   "source": "booking-service",
-  "type": "story.requested",
-  "datacontenttype": "application/json",
-  "data": {
-    "message": "Write a story about a lighthouse.",
-    "approval_timeout_seconds": 86400
-  }
+  "message": "Write a story about a lighthouse.",
+  "approval_timeout_seconds": 86400
 }
 ```
+
+The gateway wraps this in a `story.requested` CloudEvent and publishes it
+through its local Dapr sidecar. A successful response means Dapr accepted the
+event; it does not mean the story has already been drafted.
 
 In the current Kind setup, Dapr Pub/Sub and workflow state use the same Redis
 service for a small demonstration. Production scale should use an appropriately
 sized broker and state store, with independent capacity, monitoring, and failure
-policies. Local slim-mode setup does not configure a broker; event intake is
-currently enabled and integration-tested in Kind.
+policies. The `k8s/resiliency.yaml` policy governs only transient Pub/Sub
+delivery; it does not replace activity retry settings in `app/workflow.py`.
+Local slim-mode setup does not configure a broker; event intake is currently
+enabled and integration-tested in Kind.
 
 ## Option 1: run locally with Dapr (quickest)
 
@@ -200,15 +211,18 @@ Actions secret.
 | --- | --- |
 | `app/workflow.py` | The Dapr workflow, its two activities and the retry policies |
 | `app/agent.py` | Deep agent (skill + LLM) that drafts the story; MCP client for publishing |
-| `app/main.py` | FastAPI endpoints on top of the Dapr workflow client |
+| `app/main.py` | Webhook gateway, Pub/Sub subscriber, and FastAPI workflow endpoints |
+| `app/events.py` | CloudEvent validation and stable event-to-workflow IDs |
 | `app/index.html` | Reviewer dashboard: recent workflows, timeline, countdown, revision comparison, downloads |
 | `mcp_server/publisher.py` | Flaky MCP server: each story fails 7 times, then publishes |
 | `skills/hp-season-1/SKILL.md` | The skill the agent follows to write the story |
 | `dapr/components/statestore.yaml` | Local state store (SQLite) for `dapr run` |
 | `k8s/pubsub.yaml` | Redis-backed Dapr Pub/Sub component for event-triggered workflows |
+| `k8s/resiliency.yaml` | Bounded Pub/Sub delivery retries before dead-lettering |
 | `k8s/` | Kind manifests and `deploy-kind.ps1` |
 | `Dockerfile` | One image for the app and the publisher |
 | `scripts/verify_step3.py` | PASS/FAIL checks against the running app |
+| `scripts/verify_event_intake.py` | Kind check for webhook intake, duplicate deliveries, human approval, and publication |
 
 ## Settings (`.env`)
 

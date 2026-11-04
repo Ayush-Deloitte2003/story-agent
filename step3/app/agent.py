@@ -133,8 +133,11 @@ def _text(content) -> str:
     return str(content)
 
 
-async def publish_via_mcp(title: str, story: str) -> str:
+async def publish_via_mcp(title: str, story: str, idempotency_key: str | None = None) -> str:
     """Call the MCP server's publish_story once. Raises if the server fails."""
     tools = await load_mcp_tools()
     tool = next(t for t in tools if t.name == PUBLISH_TOOL)
-    return _text(await tool.ainvoke({"title": title, "story": story}))
+    arguments = {"title": title, "story": story}
+    if idempotency_key is not None:
+        arguments["idempotency_key"] = idempotency_key
+    return _text(await tool.ainvoke(arguments))

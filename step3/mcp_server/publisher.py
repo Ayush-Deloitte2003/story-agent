@@ -70,8 +70,11 @@ def _write_atomic(path: Path, contents: str) -> None:
 def _publish_once(key: str, title: str, story: str) -> str:
     with _lock:
         state = _load_state()
+        content_sha256 = hashlib.sha256(f"{title}\n{story}".encode()).hexdigest()
         previous = state["published"].get(key)
         if previous:
+            if previous.get("content_sha256", content_sha256) != content_sha256:
+                raise ValueError("Idempotency key was already used for different story content.")
             return previous["result"]
 
         attempt = state["attempts"].get(key, 0) + 1
@@ -90,21 +93,31 @@ def _publish_once(key: str, title: str, story: str) -> str:
         path = PUBLISH_DIR / f"{slug}-{key}.md"
         _write_atomic(path, f"# {title}\n\n{story}\n")
         result = f"Published '{title}' to published/{path.name} on attempt {attempt}"
-        state["published"][key] = {"attempt": attempt, "result": result}
+        state["published"][key] = {
+            "attempt": attempt,
+            "result": result,
+            "content_sha256": content_sha256,
+        }
         _write_atomic(STATE_FILE, json.dumps(state, indent=2))
         log.info("publish '%s' attempt %d: OK -> %s", title, attempt, path.name)
         return result
 
 
 @mcp.tool()
-def publish_story(title: str, story: str) -> str:
+def publish_story(title: str, story: str, idempotency_key: str | None = None) -> str:
     """Publish a finished story. A human must approve this call before it runs.
 
     Args:
         title: Short title for the story.
         story: The complete story text.
+        idempotency_key: Stable workflow ID used to deduplicate retried publishing.
     """
-    key = hashlib.sha256(f"{title}\n{story}".encode()).hexdigest()
+    if idempotency_key is not None:
+        if not idempotency_key.strip() or len(idempotency_key) > 512:
+            raise ValueError("idempotency_key must be a non-empty string of at most 512 characters.")
+        key = hashlib.sha256(f"workflow:{idempotency_key}".encode()).hexdigest()
+    else:
+        key = hashlib.sha256(f"{title}\n{story}".encode()).hexdigest()
     return _publish_once(key, title, story)
 
 

@@ -15,6 +15,8 @@ import json
 import logging
 import os
 import time
+import urllib.error
+import urllib.request
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -70,6 +72,13 @@ class ChatRequest(BaseModel):
     approval_timeout_seconds: float | None = Field(
         None, gt=0, description="Override the approval window for this story (default from APPROVAL_TIMEOUT_HOURS)."
     )
+
+
+class StoryRequestedWebhook(BaseModel):
+    id: str = Field(min_length=1, max_length=256)
+    source: str = Field(min_length=1, max_length=512)
+    message: str = Field(min_length=1)
+    approval_timeout_seconds: float | None = Field(None, gt=0)
 
 
 class DecisionRequest(BaseModel):
@@ -140,6 +149,47 @@ async def chat(req: ChatRequest):
     return await _wait_for(thread_id, lambda v: v["status"] not in ("writing",))
 
 
+def _publish_cloud_event(event: dict) -> None:
+    dapr_port = os.getenv("DAPR_HTTP_PORT", "3500")
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{dapr_port}/v1.0/publish/pubsub/story-events",
+        data=json.dumps(event).encode("utf-8"),
+        headers={"Content-Type": "application/cloudevents+json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            if response.status not in (200, 202, 204):
+                raise RuntimeError(f"Dapr Pub/Sub returned HTTP {response.status}")
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError(f"Could not publish event through the Dapr sidecar: {exc}") from exc
+
+
+@app.post("/webhooks/story-requested", status_code=202, include_in_schema=False)
+async def webhook_story_requested(req: StoryRequestedWebhook):
+    event = {
+        "specversion": "1.0",
+        "id": req.id,
+        "source": req.source,
+        "type": "story.requested",
+        "datacontenttype": "application/json",
+        "data": {"message": req.message},
+    }
+    if req.approval_timeout_seconds is not None:
+        event["data"]["approval_timeout_seconds"] = req.approval_timeout_seconds
+    try:
+        parse_story_requested_event(event)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    try:
+        await asyncio.to_thread(_publish_cloud_event, event)
+    except RuntimeError as exc:
+        log.exception("Webhook event %s/%s could not be published", req.source, req.id)
+        raise HTTPException(503, str(exc)) from exc
+    return {"status": "ACCEPTED", "event_id": req.id, "source": req.source}
+
+
 @app.get("/dapr/subscribe", include_in_schema=False)
 async def dapr_subscriptions():
     return [{
@@ -152,6 +202,7 @@ async def dapr_subscriptions():
             }],
             "default": "/events/unhandled",
         },
+        "deadLetterTopic": "story-events-dead",
     }]
 
 
