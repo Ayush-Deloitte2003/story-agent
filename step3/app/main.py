@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 import dapr.ext.workflow as wf  # noqa: E402
-from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi import Body, FastAPI, HTTPException  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
@@ -156,7 +156,7 @@ async def dapr_subscriptions():
 
 
 @app.post("/events/story-requested", include_in_schema=False)
-async def story_requested(event: object):
+async def story_requested(event: object = Body(...)):
     try:
         source, event_id, workflow_input = parse_story_requested_event(event)
     except ValueError as exc:
@@ -185,7 +185,7 @@ async def story_requested(event: object):
 
 
 @app.post("/events/unhandled", include_in_schema=False)
-async def unhandled_event(event: object):
+async def unhandled_event(event: object = Body(...)):
     event_type = event.get("type") if isinstance(event, dict) else None
     log.warning("Dropping event with no matching story route: %s", event_type)
     return {"status": "DROP"}
