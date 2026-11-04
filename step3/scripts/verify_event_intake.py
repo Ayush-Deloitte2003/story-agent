@@ -53,7 +53,7 @@ def main():
         "source": source,
         "type": "story.requested",
         "datacontenttype": "application/json",
-        "data": {"message": "Write a concise story about a lighthouse."},
+        "data": {"message": "Write the season 1 story."},
     }
     publish_event(event)
 
