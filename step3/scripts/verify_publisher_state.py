@@ -13,7 +13,10 @@ args = parser.parse_args()
 
 approved = json.loads(args.approved_draft.read_text(encoding="utf-8"))
 state = json.loads(args.state_file.read_text(encoding="utf-8"))
-key = hashlib.sha256(f"{approved['title']}\n{approved['story']}".encode()).hexdigest()
+if approved.get("workflow_id"):
+    key = hashlib.sha256(f"workflow:{approved['workflow_id']}".encode()).hexdigest()
+else:
+    key = hashlib.sha256(f"{approved['title']}\n{approved['story']}".encode()).hexdigest()
 attempt = state.get("attempts", {}).get(key)
 if not isinstance(attempt, int) or attempt < 1:
     print("Publisher attempt state for the approved draft is missing.", file=sys.stderr)

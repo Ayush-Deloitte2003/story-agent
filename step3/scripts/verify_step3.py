@@ -138,7 +138,12 @@ if args.mode == "run":
     check("The MCP tool succeeded on exactly attempt 8", attempt == 8, f"succeeded on attempt {attempt}")
     if done.get("status") == "published" and isinstance(done.get("story"), dict):
         APPROVED_DRAFT.write_text(
-            json.dumps({"title": done["story"]["title"], "story": done["story"]["story"], "reply": done.get("reply")}),
+            json.dumps({
+                "title": done["story"]["title"],
+                "story": done["story"]["story"],
+                "reply": done.get("reply"),
+                "workflow_id": tid,
+            }),
             encoding="utf-8",
         )
         out(f"    approved draft evidence saved to {APPROVED_DRAFT.name}")
@@ -196,6 +201,7 @@ elif args.mode == "publishing-start":
                 "title": draft["story"]["title"],
                 "story": draft["story"]["story"],
                 "reply": publishing.get("reply"),
+                "workflow_id": tid,
             }),
             encoding="utf-8",
         )

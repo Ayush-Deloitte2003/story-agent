@@ -1,4 +1,5 @@
 import importlib
+import hashlib
 import json
 import subprocess
 import sys
@@ -143,6 +144,30 @@ class PublisherTests(unittest.TestCase):
             text=True,
         )
         self.assertNotEqual(result.returncode, 0)
+
+    def test_publisher_state_verifier_uses_workflow_idempotency_key(self):
+        workflow_id = "story-event-workflow-123"
+        key = hashlib.sha256(f"workflow:{workflow_id}".encode()).hexdigest()
+        approved = self.root / "approved.json"
+        state_file = self.root / "attempts.json"
+        approved.write_text(json.dumps({
+            "title": "Approved",
+            "story": "Exact text",
+            "workflow_id": workflow_id,
+        }), encoding="utf-8")
+        state_file.write_text(json.dumps({
+            "attempts": {key: 8},
+            "published": {key: {"attempt": 8, "result": "published"}},
+        }), encoding="utf-8")
+        script = Path(__file__).resolve().parents[1] / "scripts" / "verify_publisher_state.py"
+
+        result = subprocess.run(
+            [sys.executable, str(script), str(approved), str(state_file)],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_failed_attempt_does_not_create_publication(self):
         with self.assertRaises(RuntimeError):
