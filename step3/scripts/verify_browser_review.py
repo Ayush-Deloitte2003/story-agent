@@ -62,7 +62,7 @@ def verify_review_journey() -> None:
                   and page.locator("#request-count").inner_text() == f"{len(example_text)} / 2000")
 
             page.locator("#message").fill(
-                "Write a brief season 1 story about a new student. Keep it concise."
+                "Write a brief season 1 story about a new student."
             )
             page.get_by_role("button", name="Write story").click()
             page.locator("#status").wait_for()
