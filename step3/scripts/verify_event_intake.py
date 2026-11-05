@@ -83,22 +83,6 @@ def main():
         raise AssertionError("Redelivered event did not resolve to its original workflow.")
     print("[PASS] Concurrent redeliveries of the CloudEvent resolve to the same workflow")
 
-    request_json(f"{APP_URL}/chat/{thread_id}/decision", {
-        "decision": "approve",
-        "expected_revision": status.get("revision", 0),
-    })
-    deadline = time.monotonic() + 300
-    while time.monotonic() < deadline:
-        completed = request_json(f"{APP_URL}/chat/{thread_id}")
-        if completed["status"] == "published":
-            print("[PASS] Human approval resumed the event-triggered workflow through publication")
-            break
-        if completed["status"] in ("failed", "expired"):
-            raise RuntimeError(f"Event workflow did not publish after approval: {completed}")
-        time.sleep(2)
-    else:
-        raise TimeoutError("Approved event workflow did not publish within 300 seconds.")
-
     review_event_id = str(uuid.uuid4())
     review_source = "step3-quality-review-verification"
     review_data = {
@@ -129,6 +113,12 @@ def main():
         time.sleep(2)
     if review_status is None or review_status["status"] != "reviewed":
         raise RuntimeError(f"Quality-review workflow did not complete successfully: {review_status}")
+    waiting_story = request_json(status_url)
+    if waiting_story is None or waiting_story["status"] != "awaiting_approval":
+        raise AssertionError(
+            "Quality-review execution changed the independent story workflow: "
+            f"{waiting_story}"
+        )
 
     result = review_status.get("review")
     if not isinstance(result, dict):
@@ -147,6 +137,22 @@ def main():
     if duplicate_review_status is None or duplicate_review_status["thread_id"] != review_status["thread_id"]:
         raise AssertionError("Redelivered quality-review event did not resolve to its original workflow.")
     print("[PASS] Repeated quality-review CloudEvents resolve to the original workflow")
+    print("[PASS] Quality-review workflow completed while story workflow remained awaiting human approval")
+
+    request_json(f"{APP_URL}/chat/{thread_id}/decision", {
+        "decision": "approve",
+        "expected_revision": waiting_story.get("revision", 0),
+    })
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        completed = request_json(f"{APP_URL}/chat/{thread_id}")
+        if completed["status"] == "published":
+            print("[PASS] Human approval resumed the event-triggered workflow through publication")
+            return
+        if completed["status"] in ("failed", "expired"):
+            raise RuntimeError(f"Event workflow did not publish after approval: {completed}")
+        time.sleep(2)
+    raise TimeoutError("Approved event workflow did not publish within 300 seconds.")
 
 
 if __name__ == "__main__":

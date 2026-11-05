@@ -83,6 +83,10 @@ side-effect-free; Dapr retries transient failures up to three total attempts.
 The Kind workflow also replaces the app pod after scheduling a review, replays
 the same event ID, and verifies that the durable workflow returns its completed
 review under the original workflow ID.
+The event integration check also completes that review while an independent
+story workflow remains paused awaiting human approval. This demonstrates
+concurrent workflow lifecycles in the current single-replica deployment; it is
+not a load or multi-replica scaling benchmark.
 
 For example, submit a webhook to the gateway:
 
@@ -254,7 +258,7 @@ Actions secret.
 | `k8s/` | Kind manifests and `deploy-kind.ps1` |
 | `Dockerfile` | One image for the app and the publisher |
 | `scripts/verify_step3.py` | PASS/FAIL checks against the running app |
-| `scripts/verify_event_intake.py` | Kind check for story and quality-review event delivery, deduplication, approval, and publication |
+| `scripts/verify_event_intake.py` | Kind check for story and quality-review event delivery, deduplication, concurrent workflow lifecycles, approval, and publication |
 | `scripts/verify_quality_review_recovery.py` | Kind check for quality-review workflow recovery and same-ID event replay after app replacement |
 
 ## Settings (`.env`)
