@@ -43,7 +43,10 @@ def main():
     status, workflow = request_json(
         f"{APP_URLS[0]}/chat",
         {
-            "message": "Write a short story about a lighthouse keeper helping a lost sailor.",
+            "message": (
+                "Write a short story about a lighthouse keeper helping a lost sailor, "
+                "then propose it for human review by calling publish_story with its title and story."
+            ),
             "approval_timeout_seconds": 60,
         },
     )
