@@ -96,6 +96,12 @@ time, mean/p50/p95 completion latency, and observed completion throughput in
 replica, not proof of production capacity or a CPU/memory benchmark. It runs
 real model calls and may encounter provider rate limits; do not interpret a
 failed run as evidence that workflow state was lost.
+The first baseline passed in [Actions run 41995787239](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/41995787239):
+10/10 events completed; ten active workflows were observed in a poll sample;
+total elapsed time was 4.70s, mean latency 4.28s, p50 4.69s, and p95 4.70s.
+The short-burst throughput calculation was 127.69 completed reviews/minute;
+this is not a sustainable rate or production capacity claim. This run did not
+collect CPU/memory, token/429, broker-lag, or multi-replica metrics.
 
 For example, submit a webhook to the gateway:
 
