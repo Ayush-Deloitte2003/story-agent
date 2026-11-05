@@ -70,6 +70,9 @@ jobs:
           python scripts/verify_step3.py run
           python scripts/verify_event_intake.py
 
+      - name: Quality-review concurrency baseline (10 workflows)
+        run: python scripts/verify_quality_review_load.py
+
       - name: Install browser test dependencies
         run: |
           python -m pip install -r requirements-browser-test.txt

@@ -88,6 +88,15 @@ story workflow remains paused awaiting human approval. This demonstrates
 concurrent workflow lifecycles in the current single-replica deployment; it is
 not a load or multi-replica scaling benchmark.
 
+The manual Kind workflow includes a 10-workflow quality-review concurrency
+baseline. It submits ten independent review events together, samples their
+nonterminal workflow count while polling, and reports completion rate, elapsed
+time, mean/p50/p95 completion latency, and observed completion throughput in
+`verify_output_step3_kind_load.txt`. This is a small baseline on one app
+replica, not proof of production capacity or a CPU/memory benchmark. It runs
+real model calls and may encounter provider rate limits; do not interpret a
+failed run as evidence that workflow state was lost.
+
 For example, submit a webhook to the gateway:
 
 ```json
@@ -260,6 +269,7 @@ Actions secret.
 | `scripts/verify_step3.py` | PASS/FAIL checks against the running app |
 | `scripts/verify_event_intake.py` | Kind check for story and quality-review event delivery, deduplication, concurrent workflow lifecycles, approval, and publication |
 | `scripts/verify_quality_review_recovery.py` | Kind check for quality-review workflow recovery and same-ID event replay after app replacement |
+| `scripts/verify_quality_review_load.py` | Small, manual Kind baseline for ten concurrent quality-review workflows |
 
 ## Settings (`.env`)
 
