@@ -278,14 +278,24 @@ Redis restart recovery, expiry while the app is down, and exhausted publish
 retries. The GitHub job summary and uploaded `step3-kind-reports` artifact
 include verification reports and the published Markdown.
 
-Decision submission is serialized within the single FastAPI process used by
-the current local and Kind deployments. This prevents two simultaneous
-requests to that process from raising conflicting decisions for the same
-revision. It is not a distributed lock for a future multi-replica API
-deployment.
+Approval decisions use a first-write claim in the Dapr `statestore`, keyed by
+workflow and draft revision, before raising the durable external event. The
+claim records only the decision and a hash of optional feedback; an identical
+request can safely retry if the event-submission response was lost, while a
+conflicting decision receives HTTP 409. This moves the concurrency guard out
+of process memory and allows app replicas to coordinate through the shared
+state store. Claims currently have no cleanup/TTL policy; production operation
+must include retention/cleanup for these records.
 
-Only the earlier Kind execution at commit `3754167` is a completed cluster
-verification. Changes in progress must be run through `step3-kind` before they
+The Kind workflow verifies this path by scaling the app to two replicas and
+sending conflicting approve/reject requests directly to separate pods. This
+is a targeted cross-replica correctness test, not a sustained throughput,
+autoscaling, or production-capacity benchmark. The Kind cluster still uses a
+single Redis pod and a single publisher pod.
+
+The latest full Kind execution at commit `95b2e11` is recorded at
+[Actions run 42000395917](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/42000395917).
+Any uncommitted changes or later commits need a new successful run before they
 can be described as verified on Kind. Local unit tests do not require the
 OpenAI key; the Kind workflow does and receives it through the repository
 Actions secret.
@@ -298,7 +308,7 @@ Actions secret.
 | `app/agent.py` | Deep agent (skill + LLM) that drafts the story; MCP client for publishing |
 | `app/main.py` | Webhook gateway, Pub/Sub subscriber, and FastAPI workflow endpoints |
 | `app/events.py` | CloudEvent validation and stable event-to-workflow IDs |
-| `app/quality_review.py` | Strict validation for the specialist review result |
+| `app/quality_review.py`, `app/specialist_reviews.py` | Strict validation for specialist review results |
 | `app/index.html` | Reviewer dashboard: recent workflows, timeline, countdown, revision comparison, downloads |
 | `mcp_server/publisher.py` | Flaky MCP server: each story fails 7 times, then publishes |
 | `skills/hp-season-1/SKILL.md` | The skill the agent follows to write the story |
@@ -308,8 +318,10 @@ Actions secret.
 | `k8s/` | Kind manifests and `deploy-kind.ps1` |
 | `Dockerfile` | One image for the app and the publisher |
 | `scripts/verify_step3.py` | PASS/FAIL checks against the running app |
-| `scripts/verify_event_intake.py` | Kind check for story and quality-review event delivery, deduplication, concurrent workflow lifecycles, approval, and publication |
+| `scripts/verify_event_intake.py` | Kind check for story and three specialist event types, replay identity, concurrent workflows, human approval, and publication |
 | `scripts/verify_quality_review_recovery.py` | Kind check for quality-review workflow recovery and same-ID event replay after app replacement |
+| `scripts/verify_specialist_recovery.py` | Kind checks for continuity and brief-compliance workflow recovery after app replacement |
+| `scripts/verify_approval_multi_replica.py` | Cross-pod approve/reject race using the shared Dapr state store |
 | `scripts/verify_quality_review_load.py` | Small, manual Kind baseline for ten concurrent quality-review workflows |
 
 ## Settings (`.env`)

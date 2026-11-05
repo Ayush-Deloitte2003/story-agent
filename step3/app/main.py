@@ -33,7 +33,7 @@ from fastapi.responses import FileResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 from app.agent import mcp_url  # noqa: E402
-from app.approval import DecisionClaims, approval_event_name  # noqa: E402
+from app.approval import DaprDecisionClaims, approval_event_name  # noqa: E402
 from app.events import (  # noqa: E402
     parse_story_brief_compliance_event,
     parse_story_continuity_check_event,
@@ -65,8 +65,7 @@ APPROVAL_TIMEOUT_HOURS = float(os.getenv("APPROVAL_TIMEOUT_HOURS", "24"))
 WAIT_SECONDS = float(os.getenv("WAIT_SECONDS", "120"))
 
 client: wf.DaprWorkflowClient | None = None
-decision_claims = DecisionClaims()
-decision_submission_lock = asyncio.Lock()
+decision_claims = DaprDecisionClaims()
 
 
 @asynccontextmanager
@@ -481,34 +480,46 @@ async def brief_compliance_event_status(event_id: str, source: str):
 
 @app.post("/chat/{thread_id}/decision")
 async def decide(thread_id: str, req: DecisionRequest):
-    async with decision_submission_lock:
-        current = await asyncio.to_thread(_view, thread_id)
-        if current is None:
-            raise HTTPException(404, f"No run found for thread_id {thread_id}")
-        revision = current.get("revision", 0)
-        decision_claims.reconcile(
-            thread_id,
-            revision if current["status"] == "awaiting_approval" else None,
-        )
-        if current["status"] == "awaiting_approval":
-            expires = datetime.fromisoformat(current["approval_expires_at"])
-            if datetime.now(timezone.utc) > expires:
-                raise HTTPException(410, "The approval window for this story has expired.")
-            if req.expected_revision is not None and req.expected_revision != revision:
-                raise HTTPException(409, "This draft has changed. Refresh before deciding.")
-        elif current["status"] == "expired":
+    current = await asyncio.to_thread(_view, thread_id)
+    if current is None:
+        raise HTTPException(404, f"No run found for thread_id {thread_id}")
+    revision = current.get("revision", 0)
+    if current["status"] == "awaiting_approval":
+        expires = datetime.fromisoformat(current["approval_expires_at"])
+        if datetime.now(timezone.utc) > expires:
             raise HTTPException(410, "The approval window for this story has expired.")
-        else:
-            raise HTTPException(409, "Nothing is awaiting approval on this thread.")
+        if req.expected_revision is not None and req.expected_revision != revision:
+            raise HTTPException(409, "This draft has changed. Refresh before deciding.")
+    elif current["status"] == "expired":
+        raise HTTPException(410, "The approval window for this story has expired.")
+    else:
+        raise HTTPException(409, "Nothing is awaiting approval on this thread.")
 
-        if not decision_claims.claim(thread_id, revision):
-            raise HTTPException(409, "A decision for this draft is already being processed.")
+    try:
+        claimed = await asyncio.to_thread(
+            decision_claims.claim,
+            thread_id,
+            revision,
+            req.decision,
+            req.feedback,
+        )
+    except RuntimeError as exc:
+        log.exception("Could not claim decision for workflow %s revision %d", thread_id, revision)
+        raise HTTPException(503, "Decision coordination is temporarily unavailable.") from exc
+    if not claimed:
+        raise HTTPException(409, "A different decision for this draft is already being processed.")
 
-        log.info("Human decision on %s: %s", thread_id, req.decision)
+    log.info("Human decision on %s revision %d: %s", thread_id, revision, req.decision)
+    try:
         await asyncio.to_thread(
             client.raise_workflow_event, thread_id, approval_event_name(revision),
             data={"decision": req.decision, "feedback": req.feedback},
         )
+    except Exception as exc:
+        log.exception("Could not submit decision event for workflow %s revision %d", thread_id, revision)
+        raise HTTPException(
+            503, "Could not submit the decision event; retry the same decision."
+        ) from exc
 
     if req.decision == "reject":
         # Wait for the revised draft (or an end state).
@@ -520,10 +531,6 @@ async def decide(thread_id: str, req: DecisionRequest):
     else:
         # Approved: return as soon as publishing has started; poll GET for the result.
         result = await _wait_for(thread_id, lambda v: v["status"] != "awaiting_approval")
-    decision_claims.reconcile(
-        thread_id,
-        result.get("revision", 0) if result["status"] == "awaiting_approval" else None,
-    )
     return result
 
 
@@ -532,10 +539,6 @@ async def status(thread_id: str):
     view = await asyncio.to_thread(_view, thread_id)
     if view is None:
         raise HTTPException(404, f"No run found for thread_id {thread_id}")
-    decision_claims.reconcile(
-        thread_id,
-        view.get("revision", 0) if view["status"] == "awaiting_approval" else None,
-    )
     return view
 
 

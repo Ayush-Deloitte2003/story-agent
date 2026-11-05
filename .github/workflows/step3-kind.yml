@@ -84,6 +84,26 @@ jobs:
       - name: Concurrent approval decision race
         run: python scripts/verify_step3.py race
 
+      - name: Cross-replica approval decision coordination
+        run: |
+          set -euo pipefail
+          trap 'kubectl scale deployment/story-agent --replicas=1 >/dev/null 2>&1 || true; pkill -f "kubectl port-forward" || true' EXIT
+          pkill -f "kubectl port-forward" || true
+          kubectl scale deployment/story-agent --replicas=2
+          kubectl rollout status deployment/story-agent --timeout=300s
+          mapfile -t pods < <(kubectl get pods -l app=story-agent -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+          test "${#pods[@]}" -eq 2
+          kubectl port-forward "pod/${pods[0]}" 8001:8000 >/tmp/pf-1.log 2>&1 &
+          kubectl port-forward "pod/${pods[1]}" 8002:8000 >/tmp/pf-2.log 2>&1 &
+          sleep 5
+          APP_URLS=http://127.0.0.1:8001,http://127.0.0.1:8002 python scripts/verify_approval_multi_replica.py
+          kubectl scale deployment/story-agent --replicas=1
+          kubectl rollout status deployment/story-agent --timeout=300s
+          pkill -f "kubectl port-forward" || true
+          kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          sleep 5
+          trap - EXIT
+
       - name: Restart test (delete the app pod)
         run: |
           pkill -f "kubectl port-forward" || true
@@ -114,6 +134,36 @@ jobs:
           kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
           sleep 5
           python scripts/verify_quality_review_recovery.py resume
+
+      - name: Continuity-check recovery after app replacement
+        run: |
+          pkill -f "kubectl port-forward" || true
+          kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          sleep 5
+          python scripts/verify_specialist_recovery.py continuity-check start
+          old=$(kubectl get pod -l app=story-agent -o name)
+          kubectl delete "$old" --wait=false
+          kubectl wait --for=delete "$old" --timeout=180s
+          kubectl wait --for=condition=Ready pod -l app=story-agent --timeout=300s
+          pkill -f "kubectl port-forward" || true
+          kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          sleep 5
+          python scripts/verify_specialist_recovery.py continuity-check resume
+
+      - name: Brief-compliance recovery after app replacement
+        run: |
+          pkill -f "kubectl port-forward" || true
+          kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          sleep 5
+          python scripts/verify_specialist_recovery.py brief-compliance start
+          old=$(kubectl get pod -l app=story-agent -o name)
+          kubectl delete "$old" --wait=false
+          kubectl wait --for=delete "$old" --timeout=180s
+          kubectl wait --for=condition=Ready pod -l app=story-agent --timeout=300s
+          pkill -f "kubectl port-forward" || true
+          kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          sleep 5
+          python scripts/verify_specialist_recovery.py brief-compliance resume
 
       - name: Publishing recovery across publisher and app replacement
         run: |
