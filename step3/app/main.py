@@ -35,12 +35,22 @@ from pydantic import BaseModel, Field  # noqa: E402
 from app.agent import mcp_url  # noqa: E402
 from app.approval import DecisionClaims, approval_event_name  # noqa: E402
 from app.events import (  # noqa: E402
+    parse_story_brief_compliance_event,
+    parse_story_continuity_check_event,
     parse_story_quality_review_event,
     parse_story_requested_event,
+    workflow_id_for_brief_compliance_event,
+    workflow_id_for_continuity_check_event,
     workflow_id_for_event,
     workflow_id_for_quality_review_event,
 )
-from app.workflow import runtime, story_quality_review_workflow, story_workflow  # noqa: E402
+from app.workflow import (  # noqa: E402
+    runtime,
+    story_brief_compliance_workflow,
+    story_continuity_check_workflow,
+    story_quality_review_workflow,
+    story_workflow,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("story-agent")
@@ -87,6 +97,22 @@ class StoryRequestedWebhook(BaseModel):
 
 
 class StoryQualityReviewWebhook(BaseModel):
+    id: str = Field(min_length=1, max_length=256)
+    source: str = Field(min_length=1, max_length=512)
+    title: str = Field(min_length=1, max_length=500)
+    story: str = Field(min_length=1, max_length=20000)
+    request: str = Field("", max_length=2000)
+
+
+class StoryContinuityCheckWebhook(BaseModel):
+    id: str = Field(min_length=1, max_length=256)
+    source: str = Field(min_length=1, max_length=512)
+    title: str = Field(min_length=1, max_length=500)
+    story: str = Field(min_length=1, max_length=20000)
+    request: str = Field("", max_length=2000)
+
+
+class StoryBriefComplianceWebhook(BaseModel):
     id: str = Field(min_length=1, max_length=256)
     source: str = Field(min_length=1, max_length=512)
     title: str = Field(min_length=1, max_length=500)
@@ -226,6 +252,52 @@ async def webhook_story_quality_review_requested(req: StoryQualityReviewWebhook)
     return {"status": "ACCEPTED", "event_id": req.id, "source": req.source}
 
 
+@app.post("/webhooks/story-continuity-check-requested", status_code=202, include_in_schema=False)
+async def webhook_story_continuity_check_requested(req: StoryContinuityCheckWebhook):
+    event = {
+        "specversion": "1.0",
+        "id": req.id,
+        "source": req.source,
+        "type": "story.continuity-check.requested",
+        "datacontenttype": "application/json",
+        "data": {"title": req.title, "story": req.story, "request": req.request},
+    }
+    try:
+        parse_story_continuity_check_event(event)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    try:
+        await asyncio.to_thread(_publish_cloud_event, event)
+    except RuntimeError as exc:
+        log.exception("Continuity-check event %s/%s could not be published", req.source, req.id)
+        raise HTTPException(503, str(exc)) from exc
+    return {"status": "ACCEPTED", "event_id": req.id, "source": req.source}
+
+
+@app.post("/webhooks/story-brief-compliance-requested", status_code=202, include_in_schema=False)
+async def webhook_story_brief_compliance_requested(req: StoryBriefComplianceWebhook):
+    event = {
+        "specversion": "1.0",
+        "id": req.id,
+        "source": req.source,
+        "type": "story.brief-compliance.requested",
+        "datacontenttype": "application/json",
+        "data": {"title": req.title, "story": req.story, "request": req.request},
+    }
+    try:
+        parse_story_brief_compliance_event(event)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    try:
+        await asyncio.to_thread(_publish_cloud_event, event)
+    except RuntimeError as exc:
+        log.exception("Brief-compliance event %s/%s could not be published", req.source, req.id)
+        raise HTTPException(503, str(exc)) from exc
+    return {"status": "ACCEPTED", "event_id": req.id, "source": req.source}
+
+
 @app.get("/dapr/subscribe", include_in_schema=False)
 async def dapr_subscriptions():
     return [{
@@ -240,6 +312,14 @@ async def dapr_subscriptions():
                 {
                     "match": 'event.type == "story.quality-review.requested"',
                     "path": "/events/story-quality-review-requested",
+                },
+                {
+                    "match": 'event.type == "story.continuity-check.requested"',
+                    "path": "/events/story-continuity-check-requested",
+                },
+                {
+                    "match": 'event.type == "story.brief-compliance.requested"',
+                    "path": "/events/story-brief-compliance-requested",
                 },
             ],
             "default": "/events/unhandled",
@@ -306,6 +386,56 @@ async def story_quality_review_requested(event: object = Body(...)):
     return {"status": "SUCCESS", "thread_id": workflow_id}
 
 
+async def _start_specialist_workflow(event, parser, workflow_id_builder, workflow, label: str):
+    try:
+        source, event_id, workflow_input = parser(event)
+    except ValueError as exc:
+        log.warning("Dropping invalid %s event: %s", label, exc)
+        return {"status": "DROP", "message": str(exc)}
+
+    workflow_id = workflow_id_builder(source, event_id)
+    try:
+        await asyncio.to_thread(
+            client.schedule_new_workflow,
+            workflow,
+            input=workflow_input,
+            instance_id=workflow_id,
+        )
+    except Exception:
+        existing = await asyncio.to_thread(client.get_workflow_state, workflow_id, fetch_payloads=False)
+        if existing is None:
+            log.exception("Could not start %s workflow for event %s/%s", label, source, event_id)
+            return {"status": "RETRY"}
+        log.info("Acknowledging redelivered %s event %s/%s as workflow %s",
+                 label, source, event_id, workflow_id)
+    else:
+        log.info("Started %s workflow %s from event %s/%s", label, workflow_id, source, event_id)
+
+    return {"status": "SUCCESS", "thread_id": workflow_id}
+
+
+@app.post("/events/story-continuity-check-requested", include_in_schema=False)
+async def story_continuity_check_requested(event: object = Body(...)):
+    return await _start_specialist_workflow(
+        event,
+        parse_story_continuity_check_event,
+        workflow_id_for_continuity_check_event,
+        story_continuity_check_workflow,
+        "continuity-check",
+    )
+
+
+@app.post("/events/story-brief-compliance-requested", include_in_schema=False)
+async def story_brief_compliance_requested(event: object = Body(...)):
+    return await _start_specialist_workflow(
+        event,
+        parse_story_brief_compliance_event,
+        workflow_id_for_brief_compliance_event,
+        story_brief_compliance_workflow,
+        "brief-compliance",
+    )
+
+
 @app.post("/events/unhandled", include_in_schema=False)
 async def unhandled_event(event: object = Body(...)):
     event_type = event.get("type") if isinstance(event, dict) else None
@@ -328,6 +458,24 @@ async def quality_review_event_status(event_id: str, source: str):
     view = await asyncio.to_thread(_view, workflow_id)
     if view is None:
         raise HTTPException(404, "No quality-review workflow found for this event.")
+    return view
+
+
+@app.get("/events/continuity-check/{event_id}", include_in_schema=False)
+async def continuity_check_event_status(event_id: str, source: str):
+    workflow_id = workflow_id_for_continuity_check_event(source, event_id)
+    view = await asyncio.to_thread(_view, workflow_id)
+    if view is None:
+        raise HTTPException(404, "No continuity-check workflow found for this event.")
+    return view
+
+
+@app.get("/events/brief-compliance/{event_id}", include_in_schema=False)
+async def brief_compliance_event_status(event_id: str, source: str):
+    workflow_id = workflow_id_for_brief_compliance_event(source, event_id)
+    view = await asyncio.to_thread(_view, workflow_id)
+    if view is None:
+        raise HTTPException(404, "No brief-compliance workflow found for this event.")
     return view
 
 

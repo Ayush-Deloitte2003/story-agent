@@ -32,8 +32,21 @@ def parse_story_requested_event(event: object) -> tuple[str, str, dict]:
 
 def parse_story_quality_review_event(event: object) -> tuple[str, str, dict]:
     """Return source, event ID, and workflow input for a quality-review CloudEvent."""
-    source, event_id, data = _event_identity_and_data(event, "story.quality-review.requested")
+    return _parse_story_review_event(event, "story.quality-review.requested")
 
+
+def parse_story_continuity_check_event(event: object) -> tuple[str, str, dict]:
+    """Return source, event ID, and workflow input for a continuity-check CloudEvent."""
+    return _parse_story_review_event(event, "story.continuity-check.requested")
+
+
+def parse_story_brief_compliance_event(event: object) -> tuple[str, str, dict]:
+    """Return source, event ID, and workflow input for a brief-compliance CloudEvent."""
+    return _parse_story_review_event(event, "story.brief-compliance.requested")
+
+
+def _parse_story_review_event(event: object, event_type: str) -> tuple[str, str, dict]:
+    source, event_id, data = _event_identity_and_data(event, event_type)
     title = data.get("title")
     story = data.get("story")
     request = data.get("request", "")
@@ -79,9 +92,29 @@ def workflow_id_for_event(source: str, event_id: str) -> str:
 
 def workflow_id_for_quality_review_event(source: str, event_id: str) -> str:
     """Map a quality-review CloudEvent to its own stable Dapr workflow ID."""
+    return _workflow_id_for_specialist_event(
+        "story.quality-review.requested", "story-quality-review", source, event_id
+    )
+
+
+def workflow_id_for_continuity_check_event(source: str, event_id: str) -> str:
+    """Map a continuity-check CloudEvent to its own stable Dapr workflow ID."""
+    return _workflow_id_for_specialist_event(
+        "story.continuity-check.requested", "story-continuity-check", source, event_id
+    )
+
+
+def workflow_id_for_brief_compliance_event(source: str, event_id: str) -> str:
+    """Map a brief-compliance CloudEvent to its own stable Dapr workflow ID."""
+    return _workflow_id_for_specialist_event(
+        "story.brief-compliance.requested", "story-brief-compliance", source, event_id
+    )
+
+
+def _workflow_id_for_specialist_event(event_type: str, prefix: str, source: str, event_id: str) -> str:
     if (not isinstance(source, str) or not source.strip()
             or len(source) > 512
             or not isinstance(event_id, str) or not event_id.strip() or len(event_id) > 256):
         raise ValueError("CloudEvent source and id must be non-empty.")
-    identity = f"story.quality-review.requested\0{source}\0{event_id}"
-    return f"story-quality-review-{uuid.uuid5(_EVENT_NAMESPACE, identity)}"
+    identity = f"{event_type}\0{source}\0{event_id}"
+    return f"{prefix}-{uuid.uuid5(_EVENT_NAMESPACE, identity)}"

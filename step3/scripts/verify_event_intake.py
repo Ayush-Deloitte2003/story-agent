@@ -139,6 +139,94 @@ def main():
     print("[PASS] Repeated quality-review CloudEvents resolve to the original workflow")
     print("[PASS] Quality-review workflow completed while story workflow remained awaiting human approval")
 
+    specialist_events = [
+        {
+            "name": "continuity-check",
+            "webhook": "story-continuity-check-requested",
+            "status_path": "continuity-check",
+            "validator": lambda result: (
+                isinstance(result.get("consistent"), bool)
+                and isinstance(result.get("summary"), str)
+                and isinstance(result.get("findings"), list)
+            ),
+        },
+        {
+            "name": "brief-compliance",
+            "webhook": "story-brief-compliance-requested",
+            "status_path": "brief-compliance",
+            "validator": lambda result: (
+                isinstance(result.get("compliant"), bool)
+                and isinstance(result.get("summary"), str)
+                and isinstance(result.get("requirements"), list)
+            ),
+        },
+    ]
+    for specialist in specialist_events:
+        specialist.update({
+            "id": str(uuid.uuid4()),
+            "source": f"step3-{specialist['name']}-verification",
+            "title": "The Lantern on Birch Street",
+            "story": review_data["story"],
+            "request": review_data["request"],
+        })
+
+    def submit_specialist(specialist):
+        response = request_json(
+            f"{APP_URL}/webhooks/{specialist['webhook']}",
+            {key: specialist[key] for key in ("id", "source", "title", "story", "request")},
+        )
+        if response.get("status") != "ACCEPTED":
+            raise AssertionError(f"{specialist['name']} webhook did not accept event: {response}")
+        return specialist
+
+    with ThreadPoolExecutor(max_workers=len(specialist_events)) as pool:
+        submitted = list(pool.map(submit_specialist, specialist_events))
+
+    for specialist in submitted:
+        encoded_source = urllib.parse.urlencode({"source": specialist["source"]})
+        specialist["status_url"] = (
+            f"{APP_URL}/events/{specialist['status_path']}/"
+            f"{urllib.parse.quote(specialist['id'])}?{encoded_source}"
+        )
+    deadline = time.monotonic() + 180
+    pending_specialists = {item["name"]: item for item in submitted}
+    while pending_specialists and time.monotonic() < deadline:
+        for item in list(pending_specialists.values()):
+            state = request_json(item["status_url"])
+            if state is None or state["status"] not in ("reviewed", "failed"):
+                continue
+            if state["status"] != "reviewed":
+                raise RuntimeError(f"{item['name']} workflow failed: {state}")
+            result = state.get("review")
+            if not isinstance(result, dict) or not item["validator"](result):
+                raise AssertionError(f"{item['name']} returned invalid advisory output: {state}")
+            item["thread_id"] = state["thread_id"]
+            del pending_specialists[item["name"]]
+            print(f"[PASS] {item['name']} event completed durable workflow {state['thread_id']}")
+        if pending_specialists:
+            time.sleep(2)
+    if pending_specialists:
+        raise TimeoutError(
+            "Specialist workflows did not complete: " + ", ".join(pending_specialists)
+        )
+
+    waiting_story = request_json(status_url)
+    if waiting_story is None or waiting_story["status"] != "awaiting_approval":
+        raise AssertionError(
+            "Specialist reviews changed the independent story workflow: "
+            f"{waiting_story}"
+        )
+    for item in submitted:
+        payload = {key: item[key] for key in ("id", "source", "title", "story", "request")}
+        request_json(f"{APP_URL}/webhooks/{item['webhook']}", payload)
+        duplicate = request_json(item["status_url"])
+        if duplicate is None or duplicate["thread_id"] != item["thread_id"]:
+            raise AssertionError(
+                f"Repeated {item['name']} event did not resolve to its original workflow."
+            )
+    print("[PASS] Continuity and brief-compliance workflows ran independently while the story awaited approval")
+    print("[PASS] Replayed specialist events resolve to their original workflow IDs")
+
     request_json(f"{APP_URL}/chat/{thread_id}/decision", {
         "decision": "approve",
         "expected_revision": waiting_story.get("revision", 0),

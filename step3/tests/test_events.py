@@ -3,12 +3,20 @@ import math
 import unittest
 
 from app.events import (
+    parse_story_brief_compliance_event,
+    parse_story_continuity_check_event,
     parse_story_quality_review_event,
     parse_story_requested_event,
+    workflow_id_for_brief_compliance_event,
+    workflow_id_for_continuity_check_event,
     workflow_id_for_event,
     workflow_id_for_quality_review_event,
 )
 from app.quality_review import parse_quality_review_response
+from app.specialist_reviews import (
+    parse_brief_compliance_response,
+    parse_continuity_check_response,
+)
 
 
 def story_event(**overrides):
@@ -125,6 +133,54 @@ class EventTests(unittest.TestCase):
         self.assertNotEqual(review_id, workflow_id_for_event("story-service", "event-1"))
         self.assertNotEqual(review_id, workflow_id_for_quality_review_event("other", "event-1"))
 
+    def test_specialist_events_have_distinct_inputs_and_workflow_ids(self):
+        base = {
+            "specversion": "1.0",
+            "id": "specialist-1",
+            "source": "story-service",
+            "data": {
+                "title": "The Lantern",
+                "story": "Mina returned the lantern to her neighbor.",
+                "request": "Write a warm story about helping a neighbor.",
+            },
+        }
+        continuity = parse_story_continuity_check_event({
+            **base, "type": "story.continuity-check.requested"
+        })
+        compliance = parse_story_brief_compliance_event({
+            **base, "type": "story.brief-compliance.requested"
+        })
+
+        self.assertEqual(continuity[2], compliance[2])
+        self.assertEqual(continuity[:2], ("story-service", "specialist-1"))
+        self.assertEqual(compliance[:2], ("story-service", "specialist-1"))
+        ids = {
+            workflow_id_for_quality_review_event("story-service", "specialist-1"),
+            workflow_id_for_continuity_check_event("story-service", "specialist-1"),
+            workflow_id_for_brief_compliance_event("story-service", "specialist-1"),
+        }
+        self.assertEqual(len(ids), 3)
+        self.assertEqual(
+            workflow_id_for_continuity_check_event("story-service", "specialist-1"),
+            workflow_id_for_continuity_check_event("story-service", "specialist-1"),
+        )
+
+    def test_specialist_event_types_and_content_are_validated(self):
+        base = {
+            "specversion": "1.0",
+            "id": "specialist-1",
+            "source": "story-service",
+            "type": "story.continuity-check.requested",
+            "data": {"title": "The Lantern", "story": "A story."},
+        }
+        with self.assertRaises(ValueError):
+            parse_story_continuity_check_event({**base, "type": "story.requested"})
+        with self.assertRaises(ValueError):
+            parse_story_brief_compliance_event({
+                **base, "type": "story.brief-compliance.requested",
+                "data": {"title": "The Lantern", "story": "A story.", "request": None},
+            })
+
     def test_quality_review_result_shape_is_validated(self):
         valid = {
             "score": 4,
@@ -149,6 +205,41 @@ class EventTests(unittest.TestCase):
                 parse_quality_review_response(json.dumps(invalid))
         with self.assertRaises(ValueError):
             parse_quality_review_response("not json")
+
+    def test_continuity_check_result_schema(self):
+        valid = {
+            "consistent": False,
+            "summary": "The lantern changes location without explanation.",
+            "findings": [{
+                "category": "setting",
+                "evidence": "It is outside the library, then at Mina's home.",
+                "issue": "The transition is not described.",
+                "suggestion": "Add a sentence explaining how Mina carried it home.",
+            }],
+        }
+        self.assertEqual(parse_continuity_check_response(json.dumps(valid)), valid)
+        with self.assertRaises(ValueError):
+            parse_continuity_check_response(json.dumps({**valid, "consistent": "no"}))
+        with self.assertRaises(ValueError):
+            parse_continuity_check_response(json.dumps({**valid, "findings": [{"category": "style"}]}))
+
+    def test_brief_compliance_result_schema(self):
+        valid = {
+            "compliant": True,
+            "summary": "The story follows the requested warm neighbor-helping theme.",
+            "requirements": [{
+                "requirement": "A neighbor is helped.",
+                "status": "met",
+                "evidence": "Mina returns the lantern to her neighbor.",
+            }],
+        }
+        self.assertEqual(parse_brief_compliance_response(json.dumps(valid)), valid)
+        with self.assertRaises(ValueError):
+            parse_brief_compliance_response(json.dumps({**valid, "compliant": 1}))
+        with self.assertRaises(ValueError):
+            parse_brief_compliance_response(
+                json.dumps({**valid, "requirements": [{"requirement": "help", "status": "yes"}]})
+            )
 
 
 if __name__ == "__main__":

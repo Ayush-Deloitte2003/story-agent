@@ -47,8 +47,9 @@ accepts an optional `expected_revision`; stale browser decisions receive HTTP
 
 The Kind deployment also subscribes to Dapr Pub/Sub topic `story-events`. A
 CloudEvent with type `story.requested` is routed to the existing
-`story_workflow`; other event types go to a drop route. The event `data` must
-contain a non-empty `message`, with an optional positive
+`story_workflow`; the registered specialist event types go to their respective
+independent workflows and unknown event types go to a drop route. The story
+event `data` must contain a non-empty `message`, with an optional positive
 `approval_timeout_seconds`. The workflow still drafts first and waits for the
 same human approval before publication.
 
@@ -83,10 +84,32 @@ side-effect-free; Dapr retries transient failures up to three total attempts.
 The Kind workflow also replaces the app pod after scheduling a review, replays
 the same event ID, and verifies that the durable workflow returns its completed
 review under the original workflow ID.
-The event integration check also completes that review while an independent
-story workflow remains paused awaiting human approval. This demonstrates
-concurrent workflow lifecycles in the current single-replica deployment; it is
-not a load or multi-replica scaling benchmark.
+
+Two further independent specialist event types use the same topic and retry
+policy:
+
+| Event type | Workflow | Responsibility | Result |
+| --- | --- | --- | --- |
+| `story.continuity-check.requested` | `story_continuity_check_workflow` | Check character, setting, timeline, and plot consistency. | `consistent`, summary, and evidence-backed findings. |
+| `story.brief-compliance.requested` | `story_brief_compliance_workflow` | Compare the story with concrete requirements in the original request. | `compliant`, summary, and requirement-by-requirement status/evidence. |
+
+Submit the continuity checker at
+`POST /webhooks/story-continuity-check-requested` and query it at
+`GET /events/continuity-check/{event_id}?source={source}`. Submit the
+brief-compliance reviewer at `POST /webhooks/story-brief-compliance-requested`
+and query it at `GET /events/brief-compliance/{event_id}?source={source}`.
+Each agent has a distinct event type and deterministic workflow-ID namespace,
+so equal source/event IDs across specialist types do not collide. Both take a
+title/story/request payload, return validated advisory-only results, and
+cannot approve or publish. They run as independent Dapr workflows; there is no
+new sequential orchestrator coupling their completion.
+
+The Kind event integration check sends fixed story inputs to both new
+specialists concurrently, validates their result shapes, replays their event
+IDs, and verifies the story workflow remains paused for human approval.
+Together with the existing quality-review recovery test, these checks
+demonstrate independent durable workflow lifecycles and recovery, not
+multi-replica or production-scale capacity.
 
 The manual Kind workflow includes a 10-workflow quality-review concurrency
 baseline. It submits ten independent review events together, samples their
@@ -102,6 +125,14 @@ total elapsed time was 4.70s, mean latency 4.28s, p50 4.69s, and p95 4.70s.
 The short-burst throughput calculation was 127.69 completed reviews/minute;
 this is not a sustainable rate or production capacity claim. This run did not
 collect CPU/memory, token/429, broker-lag, or multi-replica metrics.
+
+The short baseline is retained as historical evidence. It does not answer
+whether Dapr scales better than DBOS or Temporal. A meaningful comparison must
+run the same event inputs, agent calls, retry and persistence semantics, model
+provider/quotas, replica resources, and load profile on each runtime, and report
+tail latency, queue delay/backlog, provider throttling, resource use, and
+recovery behavior. No framework comparison or production-scale claim has yet
+been run.
 
 For example, submit a webhook to the gateway:
 
