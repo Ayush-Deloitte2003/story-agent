@@ -110,6 +110,10 @@ IDs, and verifies the story workflow remains paused for human approval.
 Together with the existing quality-review recovery test, these checks
 demonstrate independent durable workflow lifecycles and recovery, not
 multi-replica or production-scale capacity.
+Full Kind/Dapr verification passed in
+[Actions run 42000395917](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/42000395917),
+including these specialist checks and the existing approval, restart,
+publisher-recovery, and ten-workflow baseline checks.
 
 The manual Kind workflow includes a 10-workflow quality-review concurrency
 baseline. It submits ten independent review events together, samples their
