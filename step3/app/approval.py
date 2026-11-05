@@ -35,7 +35,6 @@ class DaprDecisionClaims:
             data=json.dumps([{
                 "key": key,
                 "value": value,
-                "etag": "*",
                 "options": {"concurrency": "first-write", "consistency": "strong"},
             }]).encode("utf-8"),
             headers={"Content-Type": "application/json"},

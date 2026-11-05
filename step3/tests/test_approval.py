@@ -34,7 +34,7 @@ class DaprDecisionClaimsTests(unittest.TestCase):
         path = urlparse(request.full_url).path
         if request.method == "POST":
             state = json.loads(request.data)[0]
-            self.assertEqual(state["etag"], "*")
+            self.assertNotIn("etag", state)
             self.assertEqual(state["options"], {
                 "concurrency": "first-write",
                 "consistency": "strong",
