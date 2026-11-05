@@ -80,6 +80,9 @@ same event ID on retries; its deterministic workflow identity is separate from
 the writing workflow. A `ready` recommendation is advisory only and never
 replaces human approval or triggers publishing. The review activity is
 side-effect-free; Dapr retries transient failures up to three total attempts.
+The Kind workflow also replaces the app pod after scheduling a review, replays
+the same event ID, and verifies that the durable workflow returns its completed
+review under the original workflow ID.
 
 For example, submit a webhook to the gateway:
 
@@ -216,10 +219,10 @@ It also runs a Chromium browser journey through the actual reviewer page:
 create a draft, reject with feedback, inspect the revision comparison, approve
 the new draft, wait for publication, and verify the downloaded Markdown and
 browser-observed timeline.
-It also tests app-pod replacement, Redis restart recovery, expiry while the app
-is down, and exhausted publish retries. The GitHub job summary and uploaded
-`step3-kind-reports` artifact include verification reports and the published
-Markdown.
+It also tests app-pod replacement, quality-review replay after app replacement,
+Redis restart recovery, expiry while the app is down, and exhausted publish
+retries. The GitHub job summary and uploaded `step3-kind-reports` artifact
+include verification reports and the published Markdown.
 
 Decision submission is serialized within the single FastAPI process used by
 the current local and Kind deployments. This prevents two simultaneous
@@ -252,6 +255,7 @@ Actions secret.
 | `Dockerfile` | One image for the app and the publisher |
 | `scripts/verify_step3.py` | PASS/FAIL checks against the running app |
 | `scripts/verify_event_intake.py` | Kind check for story and quality-review event delivery, deduplication, approval, and publication |
+| `scripts/verify_quality_review_recovery.py` | Kind check for quality-review workflow recovery and same-ID event replay after app replacement |
 
 ## Settings (`.env`)
 

@@ -97,6 +97,21 @@ jobs:
           sleep 5
           python scripts/verify_step3.py resume
 
+      - name: Quality-review recovery and same-ID replay
+        run: |
+          pkill -f "kubectl port-forward" || true
+          kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          sleep 5
+          python scripts/verify_quality_review_recovery.py start
+          old=$(kubectl get pod -l app=story-agent -o name)
+          kubectl delete "$old" --wait=false
+          kubectl wait --for=delete "$old" --timeout=180s
+          kubectl wait --for=condition=Ready pod -l app=story-agent --timeout=300s
+          pkill -f "kubectl port-forward" || true
+          kubectl port-forward svc/story-agent 8000:8000 >/tmp/pf.log 2>&1 &
+          sleep 5
+          python scripts/verify_quality_review_recovery.py resume
+
       - name: Publishing recovery across publisher and app replacement
         run: |
           pkill -f "kubectl port-forward" || true
