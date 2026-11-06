@@ -102,6 +102,10 @@ def start(name):
         if state is not None:
             if state.get("thread_id") != expected_id:
                 raise AssertionError(f"Unexpected {name} workflow ID: {state}")
+            if state.get("status") != SPECIALISTS[name]["stage"]:
+                raise AssertionError(
+                    f"{name} workflow was not active when replacement was requested: {state}"
+                )
             print(f"[PASS] {name} scheduled durable workflow {expected_id}")
             print(f"    status before app replacement: {state.get('status')}")
             return

@@ -7,5 +7,5 @@ COPY app app
 COPY mcp_server mcp_server
 COPY skills skills
 ENV PYTHONUNBUFFERED=1
-EXPOSE 8000 8765
+EXPOSE 8000 8001 8765
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

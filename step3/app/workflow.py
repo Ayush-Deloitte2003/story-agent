@@ -19,10 +19,8 @@ from datetime import timedelta
 import dapr.ext.workflow as wf
 
 from app.agent import (
-    check_story_continuity,
     draft_story,
     publish_via_mcp,
-    review_story_brief_compliance,
     review_story_quality,
 )
 from app.approval import approval_event_name
@@ -37,12 +35,6 @@ WRITE_RETRY = wf.RetryPolicy(
 )
 
 QUALITY_REVIEW_RETRY = wf.RetryPolicy(
-    first_retry_interval=timedelta(seconds=2),
-    max_number_of_attempts=3,
-    backoff_coefficient=2.0,
-)
-
-SPECIALIST_REVIEW_RETRY = wf.RetryPolicy(
     first_retry_interval=timedelta(seconds=2),
     max_number_of_attempts=3,
     backoff_coefficient=2.0,
@@ -114,30 +106,6 @@ def story_quality_review_workflow(ctx: wf.DaprWorkflowContext, inp: dict):
     return {"status": "reviewed", "title": inp["title"], "review": result}
 
 
-@runtime.workflow(name="story_continuity_check_workflow")
-def story_continuity_check_workflow(ctx: wf.DaprWorkflowContext, inp: dict):
-    _status(ctx, "checking_continuity", title=inp["title"])
-    result = yield ctx.call_activity(
-        continuity_check_story,
-        input=inp,
-        retry_policy=SPECIALIST_REVIEW_RETRY,
-    )
-    _status(ctx, "continuity_checked", title=inp["title"], review=result)
-    return {"status": "reviewed", "title": inp["title"], "review": result}
-
-
-@runtime.workflow(name="story_brief_compliance_workflow")
-def story_brief_compliance_workflow(ctx: wf.DaprWorkflowContext, inp: dict):
-    _status(ctx, "checking_brief_compliance", title=inp["title"])
-    result = yield ctx.call_activity(
-        brief_compliance_review_story,
-        input=inp,
-        retry_policy=SPECIALIST_REVIEW_RETRY,
-    )
-    _status(ctx, "brief_compliance_checked", title=inp["title"], review=result)
-    return {"status": "reviewed", "title": inp["title"], "review": result}
-
-
 @runtime.activity(name="write_story")
 async def write_story(ctx: wf.WorkflowActivityContext, inp: dict) -> dict:
     log.info("write_story (revision %d)", len(inp["revisions"]))
@@ -148,20 +116,6 @@ async def write_story(ctx: wf.WorkflowActivityContext, inp: dict) -> dict:
 async def quality_review_story(ctx: wf.WorkflowActivityContext, inp: dict) -> dict:
     log.info("quality review started for %s", inp["title"])
     return await review_story_quality(inp["title"], inp["story"], inp.get("request", ""))
-
-
-@runtime.activity(name="continuity_check_story")
-async def continuity_check_story(ctx: wf.WorkflowActivityContext, inp: dict) -> dict:
-    log.info("continuity check started for %s", inp["title"])
-    return await check_story_continuity(inp["title"], inp["story"], inp.get("request", ""))
-
-
-@runtime.activity(name="brief_compliance_review_story")
-async def brief_compliance_review_story(ctx: wf.WorkflowActivityContext, inp: dict) -> dict:
-    log.info("brief-compliance review started for %s", inp["title"])
-    return await review_story_brief_compliance(
-        inp["title"], inp["story"], inp.get("request", "")
-    )
 
 
 @runtime.activity(name="publish_story")

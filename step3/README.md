@@ -45,13 +45,18 @@ accepts an optional `expected_revision`; stale browser decisions receive HTTP
 
 ### Event-triggered workflow intake
 
-The Kind deployment also subscribes to Dapr Pub/Sub topic `story-events`. A
-CloudEvent with type `story.requested` is routed to the existing
-`story_workflow`; the registered specialist event types go to their respective
-independent workflows and unknown event types go to a drop route. The story
-event `data` must contain a non-empty `message`, with an optional positive
-`approval_timeout_seconds`. The workflow still drafts first and waits for the
-same human approval before publication.
+The Kind deployment also subscribes to Dapr Pub/Sub topic `story-events`. The
+`story-agent` service routes `story.requested` and
+`story.quality-review.requested` to its workflow runtime. Continuity and
+brief-compliance use separate Kubernetes Deployments and Services
+(`continuity-worker` and `brief-compliance-worker`); each pod has its own
+injected Dapr sidecar, distinct Dapr app ID, workflow runtime, and event
+subscription. Each worker subscribes only to its assigned event type, so the
+same event topic can feed the independently scalable services without the
+story API also consuming those specialist events. Unknown event types go to a
+drop route. The story event `data` must contain a non-empty `message`, with an
+optional positive `approval_timeout_seconds`. The workflow still drafts first
+and waits for the same human approval before publication.
 
 The workflow ID is derived deterministically from the CloudEvent `source` and
 `id`. Dapr Pub/Sub delivers at least once, so a redelivered event maps to the
@@ -98,18 +103,25 @@ Submit the continuity checker at
 `GET /events/continuity-check/{event_id}?source={source}`. Submit the
 brief-compliance reviewer at `POST /webhooks/story-brief-compliance-requested`
 and query it at `GET /events/brief-compliance/{event_id}?source={source}`.
-Each agent has a distinct event type and deterministic workflow-ID namespace,
-so equal source/event IDs across specialist types do not collide. Both take a
-title/story/request payload, return validated advisory-only results, and
-cannot approve or publish. They run as independent Dapr workflows; there is no
-new sequential orchestrator coupling their completion.
+Each worker has a distinct event type, Dapr app ID, and deterministic
+workflow-ID namespace, so equal source/event IDs across specialist types do
+not collide. Both take a title/story/request payload, return validated
+advisory-only results, and cannot approve or publish. They run as independent
+Dapr workflows; there is no new sequential orchestrator coupling their
+completion. The public webhook and status URLs remain on `story-agent`; the
+status routes proxy internally to the owning worker. Scale a specialist
+independently by changing its Deployment replica count, for example
+`kubectl scale deployment/continuity-worker --replicas=2`.
 
 The Kind event integration check sends fixed story inputs to both new
 specialists concurrently, validates their result shapes, replays their event
-IDs, and verifies the story workflow remains paused for human approval.
-Together with the existing quality-review recovery test, these checks
-demonstrate independent durable workflow lifecycles and recovery, not
-multi-replica or production-scale capacity.
+IDs, and verifies the story workflow remains paused for human approval. The
+recovery checks delay each specialist activity, replace that worker pod while
+its workflow is active, replay the event, and validate the advisory result
+under the original workflow ID. Deployment checks confirm each specialist pod
+contains both its application container and the injected `daprd` sidecar.
+Together these checks demonstrate separate sidecar-backed services and
+workflow recovery in Kind, not production HA or capacity.
 Full Kind/Dapr verification passed in
 [Actions run 42000395917](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/42000395917),
 including these specialist checks and the existing approval, restart,
@@ -214,15 +226,17 @@ kubectl port-forward svc/story-agent 8000:8000
 
 The script creates a Kind cluster `story`, installs Dapr into it, builds the
 image, loads it into Kind, turns your `.env` into a Kubernetes secret and
-applies `k8s/`: Redis (state store), the Dapr `statestore` component, the
-publisher MCP server, and the app with an injected Dapr sidecar.
+applies `k8s/`: Redis (state store), the Dapr components, the publisher MCP
+server, the story API and both specialist workers with injected Dapr sidecars.
 
 Useful commands:
 
 ```powershell
-kubectl get pods                                     # all should be Running (story-agent shows 2/2: app + Dapr sidecar)
+kubectl get pods                                     # app and specialist worker pods should each show 2/2
 kubectl logs deploy/publisher -f                     # watch the publish attempts
 kubectl logs deploy/story-agent -c story-agent -f    # the app
+kubectl logs deploy/continuity-worker -c continuity-worker -f
+kubectl logs deploy/brief-compliance-worker -c brief-compliance-worker -f
 kubectl exec deploy/publisher -- ls /data/published  # published stories
 ```
 
@@ -320,7 +334,8 @@ Actions secret.
 | `scripts/verify_step3.py` | PASS/FAIL checks against the running app |
 | `scripts/verify_event_intake.py` | Kind check for story and three specialist event types, replay identity, concurrent workflows, human approval, and publication |
 | `scripts/verify_quality_review_recovery.py` | Kind check for quality-review workflow recovery and same-ID event replay after app replacement |
-| `scripts/verify_specialist_recovery.py` | Kind checks for continuity and brief-compliance workflow recovery after app replacement |
+| `scripts/verify_specialist_deployments.py` | Confirms each specialist has a ready Dapr sidecar and only its assigned Pub/Sub subscription |
+| `scripts/verify_specialist_recovery.py` | Kind checks for continuity and brief-compliance workflow recovery after worker-pod replacement |
 | `scripts/verify_approval_multi_replica.py` | Cross-pod approve/reject race using the shared Dapr state store |
 | `scripts/verify_quality_review_load.py` | Small, manual Kind baseline for ten concurrent quality-review workflows |
 

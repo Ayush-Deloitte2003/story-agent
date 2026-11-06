@@ -16,6 +16,7 @@ import logging
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from contextlib import asynccontextmanager
@@ -35,22 +36,17 @@ from pydantic import BaseModel, Field  # noqa: E402
 from app.agent import mcp_url  # noqa: E402
 from app.approval import DaprDecisionClaims, approval_event_name  # noqa: E402
 from app.events import (  # noqa: E402
-    parse_story_brief_compliance_event,
-    parse_story_continuity_check_event,
     parse_story_quality_review_event,
     parse_story_requested_event,
-    workflow_id_for_brief_compliance_event,
-    workflow_id_for_continuity_check_event,
     workflow_id_for_event,
     workflow_id_for_quality_review_event,
 )
 from app.workflow import (  # noqa: E402
     runtime,
-    story_brief_compliance_workflow,
-    story_continuity_check_workflow,
     story_quality_review_workflow,
     story_workflow,
 )
+from app.workflow_status import workflow_view  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("story-agent")
@@ -125,42 +121,8 @@ class DecisionRequest(BaseModel):
     expected_revision: int | None = Field(None, ge=0)
 
 
-def _loads(raw):
-    """Dapr returns JSON; a custom status string arrives JSON-encoded once more."""
-    value = json.loads(raw) if raw else None
-    return json.loads(value) if isinstance(value, str) else value
-
-
 def _view(thread_id: str) -> dict | None:
-    state = client.get_workflow_state(thread_id, fetch_payloads=True)
-    if state is None:
-        return None
-    custom = _loads(state.serialized_custom_status) or {}
-    runtime_status = state.runtime_status
-    body: dict = {"thread_id": thread_id, "runtime_status": runtime_status.name}
-
-    if runtime_status in (wf.WorkflowStatus.RUNNING, wf.WorkflowStatus.PENDING):
-        body["status"] = custom.get("stage", "writing")
-        for key in ("story", "revision", "approval_expires_at"):
-            if key in custom:
-                body[key] = custom[key]
-    elif runtime_status == wf.WorkflowStatus.COMPLETED:
-        output = _loads(state.serialized_output) or {}
-        body.update(output)
-        if output.get("status") == "published":
-            body["reply"] = output.get("result")
-    elif runtime_status == wf.WorkflowStatus.FAILED:
-        details = state.failure_details
-        body.update(status="failed", error=getattr(details, "message", "workflow failed"))
-    else:
-        body["status"] = runtime_status.name.lower()
-
-    if isinstance(body.get("story"), dict):
-        body["llm_calls"] = body["story"].pop("llm_calls", None)
-    expires = body.get("approval_expires_at")
-    if expires and not expires.endswith(("Z", "+00:00")):
-        body["approval_expires_at"] = expires + "+00:00"  # Dapr's clock is UTC
-    return body
+    return workflow_view(client, thread_id)
 
 
 async def _wait_for(thread_id: str, done) -> dict:
@@ -312,14 +274,6 @@ async def dapr_subscriptions():
                     "match": 'event.type == "story.quality-review.requested"',
                     "path": "/events/story-quality-review-requested",
                 },
-                {
-                    "match": 'event.type == "story.continuity-check.requested"',
-                    "path": "/events/story-continuity-check-requested",
-                },
-                {
-                    "match": 'event.type == "story.brief-compliance.requested"',
-                    "path": "/events/story-brief-compliance-requested",
-                },
             ],
             "default": "/events/unhandled",
         },
@@ -385,56 +339,6 @@ async def story_quality_review_requested(event: object = Body(...)):
     return {"status": "SUCCESS", "thread_id": workflow_id}
 
 
-async def _start_specialist_workflow(event, parser, workflow_id_builder, workflow, label: str):
-    try:
-        source, event_id, workflow_input = parser(event)
-    except ValueError as exc:
-        log.warning("Dropping invalid %s event: %s", label, exc)
-        return {"status": "DROP", "message": str(exc)}
-
-    workflow_id = workflow_id_builder(source, event_id)
-    try:
-        await asyncio.to_thread(
-            client.schedule_new_workflow,
-            workflow,
-            input=workflow_input,
-            instance_id=workflow_id,
-        )
-    except Exception:
-        existing = await asyncio.to_thread(client.get_workflow_state, workflow_id, fetch_payloads=False)
-        if existing is None:
-            log.exception("Could not start %s workflow for event %s/%s", label, source, event_id)
-            return {"status": "RETRY"}
-        log.info("Acknowledging redelivered %s event %s/%s as workflow %s",
-                 label, source, event_id, workflow_id)
-    else:
-        log.info("Started %s workflow %s from event %s/%s", label, workflow_id, source, event_id)
-
-    return {"status": "SUCCESS", "thread_id": workflow_id}
-
-
-@app.post("/events/story-continuity-check-requested", include_in_schema=False)
-async def story_continuity_check_requested(event: object = Body(...)):
-    return await _start_specialist_workflow(
-        event,
-        parse_story_continuity_check_event,
-        workflow_id_for_continuity_check_event,
-        story_continuity_check_workflow,
-        "continuity-check",
-    )
-
-
-@app.post("/events/story-brief-compliance-requested", include_in_schema=False)
-async def story_brief_compliance_requested(event: object = Body(...)):
-    return await _start_specialist_workflow(
-        event,
-        parse_story_brief_compliance_event,
-        workflow_id_for_brief_compliance_event,
-        story_brief_compliance_workflow,
-        "brief-compliance",
-    )
-
-
 @app.post("/events/unhandled", include_in_schema=False)
 async def unhandled_event(event: object = Body(...)):
     event_type = event.get("type") if isinstance(event, dict) else None
@@ -460,10 +364,28 @@ async def quality_review_event_status(event_id: str, source: str):
     return view
 
 
+def _specialist_status(worker: str, event_id: str, source: str) -> dict | None:
+    query = urllib.parse.urlencode({"source": source})
+    request = urllib.request.Request(
+        f"http://{worker}:8001/events/{event_id}?{query}",
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise HTTPException(503, f"Specialist status service returned HTTP {exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise HTTPException(503, f"Specialist status service is unavailable: {exc}") from exc
+
+
 @app.get("/events/continuity-check/{event_id}", include_in_schema=False)
 async def continuity_check_event_status(event_id: str, source: str):
-    workflow_id = workflow_id_for_continuity_check_event(source, event_id)
-    view = await asyncio.to_thread(_view, workflow_id)
+    view = await asyncio.to_thread(
+        _specialist_status, "continuity-worker", event_id, source
+    )
     if view is None:
         raise HTTPException(404, "No continuity-check workflow found for this event.")
     return view
@@ -471,8 +393,9 @@ async def continuity_check_event_status(event_id: str, source: str):
 
 @app.get("/events/brief-compliance/{event_id}", include_in_schema=False)
 async def brief_compliance_event_status(event_id: str, source: str):
-    workflow_id = workflow_id_for_brief_compliance_event(source, event_id)
-    view = await asyncio.to_thread(_view, workflow_id)
+    view = await asyncio.to_thread(
+        _specialist_status, "brief-compliance-worker", event_id, source
+    )
     if view is None:
         raise HTTPException(404, "No brief-compliance workflow found for this event.")
     return view
