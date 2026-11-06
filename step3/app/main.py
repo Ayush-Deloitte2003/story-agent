@@ -36,6 +36,8 @@ from pydantic import BaseModel, Field  # noqa: E402
 from app.agent import mcp_url  # noqa: E402
 from app.approval import DaprDecisionClaims, approval_event_name  # noqa: E402
 from app.events import (  # noqa: E402
+    parse_story_brief_compliance_event,
+    parse_story_continuity_check_event,
     parse_story_quality_review_event,
     parse_story_requested_event,
     workflow_id_for_event,
