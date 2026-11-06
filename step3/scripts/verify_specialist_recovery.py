@@ -102,15 +102,18 @@ def start(name):
         if state is not None:
             if state.get("thread_id") != expected_id:
                 raise AssertionError(f"Unexpected {name} workflow ID: {state}")
-            if state.get("status") != SPECIALISTS[name]["stage"]:
+            if state.get("status") == SPECIALISTS[name]["stage"]:
+                print(f"[PASS] {name} scheduled durable workflow {expected_id}")
+                print(f"    status before worker replacement: {state.get('status')}")
+                return
+            if state.get("status") in ("reviewed", "failed"):
                 raise AssertionError(
-                    f"{name} workflow was not active when replacement was requested: {state}"
+                    f"{name} workflow finished before worker replacement could be tested: {state}"
                 )
-            print(f"[PASS] {name} scheduled durable workflow {expected_id}")
-            print(f"    status before app replacement: {state.get('status')}")
-            return
         time.sleep(1)
-    raise TimeoutError(f"{name} workflow state did not appear before app replacement.")
+    raise TimeoutError(
+        f"{name} workflow did not reach its active stage before worker replacement."
+    )
 
 
 def resume(name):
