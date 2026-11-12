@@ -16,10 +16,20 @@ class SpecialistReviewRequest(BaseModel):
     request: str = Field("", max_length=2000)
 
 
+class QualityReviewRequest(BaseModel):
+    title: str
+    story: str
+    request: str = ""
+
+
 ReviewFunction = Callable[[str, str, str], Awaitable[dict]]
 
 
-def create_specialist_agent_app(name: str, review: ReviewFunction) -> FastAPI:
+def create_specialist_agent_app(
+    name: str,
+    review: ReviewFunction,
+    request_model: type[BaseModel] = SpecialistReviewRequest,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         log.info("%s agent sidecar started", name)
@@ -33,7 +43,7 @@ def create_specialist_agent_app(name: str, review: ReviewFunction) -> FastAPI:
         return {"status": "ok", "agent": name}
 
     @app.post("/review", include_in_schema=False)
-    async def review_story(inp: SpecialistReviewRequest):
+    async def review_story(inp: request_model):
         return await review(inp.title, inp.story, inp.request)
 
     return app

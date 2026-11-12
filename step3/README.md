@@ -132,13 +132,21 @@ and the injected `daprd` sidecar; they also call the agent's health endpoint
 and check that the host subscribes only to its assigned topic event. Together
 these checks demonstrate literal agent sidecar containers, Dapr sidecars, and
 workflow recovery in Kind, not production HA or capacity.
+
+The story pod also runs `story-writer-agent` and `quality-review-agent` as
+loopback-only sidecar containers beside the story API/workflow host and
+`daprd`. The workflow host delegates drafting and quality review to those
+processes over pod-local HTTP. The writer sidecar uses the publisher MCP
+service, while the host retains the durable approval and publication workflow.
+The deployment check verifies both agent health endpoints and all four
+containers are ready.
 Full Kind/Dapr verification passed in
 [Actions run 43181812223](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/43181812223):
-both pods reached 3/3 Ready containers; the deployment check confirmed the
-agent containers' health endpoints and isolated subscriptions; both specialist
-workflows completed and recovered after pod replacement. The run also passed
-the approval, restart, publisher-recovery, browser, and ten-workflow baseline
-checks.
+that run validated the specialist-worker sidecars (3/3 containers per worker),
+health endpoints, isolated subscriptions, and workflow recovery. It predates
+the story-writer and quality-review sidecars described above; those additions
+require a fresh full Kind run before the expanded four-agent topology is
+considered integration-validated.
 
 The manual Kind workflow includes a 10-workflow quality-review concurrency
 baseline. It submits ten independent review events together, samples their
@@ -273,14 +281,17 @@ kubectl port-forward svc/story-agent 8000:8000
 The script creates a Kind cluster `story`, installs Dapr into it, builds the
 image, loads it into Kind, turns your `.env` into a Kubernetes secret and
 applies `k8s/`: Redis (state store), the Dapr components, the publisher MCP
-server, the story API and both specialist workers with injected Dapr sidecars.
+server, the story API with writer and quality-review agent sidecars, and both
+specialist workers with their agent and Dapr sidecars.
 
 Useful commands:
 
 ```powershell
-kubectl get pods                                     # specialist worker pods should each show 3/3
+kubectl get pods                                     # story-agent 4/4; specialist workers 3/3
 kubectl logs deploy/publisher -f                     # watch the publish attempts
 kubectl logs deploy/story-agent -c story-agent -f    # the app
+kubectl logs deploy/story-agent -c story-writer-agent -f
+kubectl logs deploy/story-agent -c quality-review-agent -f
 kubectl logs deploy/continuity-worker -c continuity-worker -f       # durable workflow host
 kubectl logs deploy/continuity-worker -c continuity-agent -f        # continuity agent sidecar
 kubectl logs deploy/brief-compliance-worker -c brief-compliance-worker -f
@@ -289,7 +300,7 @@ kubectl exec deploy/publisher -- ls /data/published  # published stories
 ```
 
 Restart test in Kind: run `verify_step3.py start`, then `kubectl delete pod -l app=story-agent`
-and wait for `kubectl get pods` to show the new pod `2/2 Running`. The port-forward stops when
+and wait for `kubectl get pods` to show the new pod `4/4 Running`. The port-forward stops when
 its pod goes away, so start `kubectl port-forward svc/story-agent 8000:8000` again, then run
 `verify_step3.py resume`. The story survives because its workflow history is in Redis, not in the pod.
 

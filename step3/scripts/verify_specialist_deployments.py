@@ -1,4 +1,4 @@
-"""Verify agent and Dapr sidecars plus isolated specialist subscriptions."""
+"""Verify all agent and Dapr sidecars plus isolated specialist subscriptions."""
 
 import json
 import subprocess
@@ -7,6 +7,10 @@ import subprocess
 WORKERS = {
     "continuity-worker": ("story.continuity-check.requested", "continuity-check"),
     "brief-compliance-worker": ("story.brief-compliance.requested", "brief-compliance"),
+}
+STORY_AGENTS = {
+    "story-writer-agent": (8100, "story-writer"),
+    "quality-review-agent": (8101, "quality-review"),
 }
 
 
@@ -92,6 +96,53 @@ def verify(name, event_type, agent_name):
     )
 
 
+def verify_story_agent_sidecars():
+    name = "story-agent"
+    deployment = json.loads(kubectl("get", "deployment", name, "-o", "json"))
+    template = deployment["spec"]["template"]
+    expected_containers = {name, *STORY_AGENTS.keys()}
+    template_containers = {
+        container["name"] for container in template["spec"]["containers"]
+    }
+    if not expected_containers.issubset(template_containers):
+        raise AssertionError(
+            f"{name} pod template is missing its agent sidecars: {template_containers}"
+        )
+
+    pods = json.loads(kubectl("get", "pod", "-l", f"app={name}", "-o", "json"))["items"]
+    ready_pods = []
+    for candidate in pods:
+        statuses = candidate.get("status", {}).get("containerStatuses", [])
+        if len(statuses) == len(candidate["spec"]["containers"]) and all(
+            container.get("ready", False) for container in statuses
+        ):
+            ready_pods.append(candidate)
+    if not ready_pods:
+        raise AssertionError(f"{name} has no pod with all containers ready")
+    pod = max(ready_pods, key=lambda item: item["metadata"]["creationTimestamp"])
+    containers = {item["name"] for item in pod["spec"]["containers"]}
+    if not expected_containers.issubset(containers) or "daprd" not in containers:
+        raise AssertionError(
+            f"{name} pod is missing its app, agent, or Dapr sidecars: {containers}"
+        )
+
+    for container_name, (port, agent_name) in STORY_AGENTS.items():
+        health = json.loads(kubectl(
+            "exec", f"pod/{pod['metadata']['name']}", "-c", container_name, "--",
+            "python", "-c",
+            "import json,urllib.request;print(json.dumps(json.load(urllib.request.urlopen("
+            f"'http://127.0.0.1:{port}/healthz'))))",
+        ))
+        if health != {"status": "ok", "agent": agent_name}:
+            raise AssertionError(f"{container_name} health check failed: {health}")
+
+    print(
+        "[PASS] story-agent pod has ready story-agent, story-writer-agent, "
+        "quality-review-agent, and daprd containers"
+    )
+
+
 if __name__ == "__main__":
+    verify_story_agent_sidecars()
     for worker, (assigned_event, agent_name) in WORKERS.items():
         verify(worker, assigned_event, agent_name)

@@ -19,10 +19,9 @@ from datetime import timedelta
 import dapr.ext.workflow as wf
 
 from app.agent import (
-    draft_story,
     publish_via_mcp,
-    review_story_quality,
 )
+from app.story_agent_client import draft_with_sidecar, review_quality_with_sidecar
 from app.approval import approval_event_name
 
 log = logging.getLogger("story-agent")
@@ -109,13 +108,15 @@ def story_quality_review_workflow(ctx: wf.DaprWorkflowContext, inp: dict):
 @runtime.activity(name="write_story")
 async def write_story(ctx: wf.WorkflowActivityContext, inp: dict) -> dict:
     log.info("write_story (revision %d)", len(inp["revisions"]))
-    return await draft_story(inp["request"], inp["revisions"])
+    return await draft_with_sidecar(inp["request"], inp["revisions"])
 
 
 @runtime.activity(name="quality_review_story")
 async def quality_review_story(ctx: wf.WorkflowActivityContext, inp: dict) -> dict:
     log.info("quality review started for %s", inp["title"])
-    return await review_story_quality(inp["title"], inp["story"], inp.get("request", ""))
+    return await review_quality_with_sidecar(
+        inp["title"], inp["story"], inp.get("request", "")
+    )
 
 
 @runtime.activity(name="publish_story")
