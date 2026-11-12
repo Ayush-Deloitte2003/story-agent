@@ -141,12 +141,14 @@ service, while the host retains the durable approval and publication workflow.
 The deployment check verifies both agent health endpoints and all four
 containers are ready.
 Full Kind/Dapr verification passed in
-[Actions run 43181812223](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/43181812223):
-that run validated the specialist-worker sidecars (3/3 containers per worker),
-health endpoints, isolated subscriptions, and workflow recovery. It predates
-the story-writer and quality-review sidecars described above; those additions
-require a fresh full Kind run before the expanded four-agent topology is
-considered integration-validated.
+[Actions run 43198335467](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/43198335467):
+the story pod reached 4/4 Ready containers, each specialist worker reached
+3/3, and deployment checks confirmed all four agent health endpoints and
+isolated specialist subscriptions. Story drafting, quality review, the
+browser approval journey, restart/replay recovery, publishing and Redis
+recovery, retry exhaustion, and the bounded ten-workflow baseline all passed.
+This validates the sidecar topology and workflow behavior in Kind, not
+production HA or capacity.
 
 The manual Kind workflow includes a 10-workflow quality-review concurrency
 baseline. It submits ten independent review events together, samples their
