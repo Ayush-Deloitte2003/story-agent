@@ -147,11 +147,32 @@ The short-burst throughput calculation was 127.69 completed reviews/minute;
 this is not a sustainable rate or production capacity claim. This run did not
 collect CPU/memory, token/429, broker-lag, or multi-replica metrics.
 
-The two-replica measurement is pending a new Kind/Dapr Actions run; do not
-report a scale-out result until that run completes successfully. The $10 test
-budget bounds the intended provider usage, but GitHub Actions cannot enforce
-an exact dollar ceiling on OpenAI billing. The current guard is the fixed
-ten-event batch and the reviewer workflow's bounded retry policy.
+The first two-replica run, [Actions run 43163968560](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/43163968560),
+accepted 10/10 events and completed 9/10 reviews; the remaining workflow
+reached a terminal failure. That run did not preserve the failure detail in
+its load report, so the benchmark was updated to include Dapr's workflow error
+in future reports.
+
+The follow-up, [Actions run 43165236361](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/43165236361),
+passed the capacity step with 10/10 reviews across two story-agent replicas:
+4.40 seconds total elapsed, 4.19 seconds mean latency, 4.39 seconds p50,
+4.40 seconds p95, and 136.37 completed reviews/minute. Ten nonterminal
+workflows were observed in one poll sample. The overall job later failed while
+installing the browser-test dependencies: `ubuntu-latest` resolved to Ubuntu
+26.04, which Playwright 1.56 does not support. Thus this run validates the
+two-replica capacity step, but not the remaining browser/recovery checks.
+The workflow now pins the runner to Ubuntu 24.04 for Playwright compatibility;
+that runner change still needs a complete follow-up validation.
+
+The historical one-replica and current two-replica results are single short
+bursts, not a controlled scaling comparison. Model-provider and hosted-runner
+variation can account for small timing differences; neither run collected
+CPU/memory, token/429, broker-lag, or other resource metrics. Do not present
+these numbers as sustainable throughput or production capacity. Provider
+quotas remain unknown, so the run held concurrency to the previously tested
+ten-event burst. Each event's activity has at most three attempts. The $10
+test budget bounds intended usage, but GitHub Actions cannot enforce an exact
+dollar ceiling on OpenAI billing.
 
 The short baseline is retained as historical evidence. It does not answer
 whether Dapr scales better than DBOS or Temporal. A meaningful comparison must
