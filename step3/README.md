@@ -147,22 +147,23 @@ The short-burst throughput calculation was 127.69 completed reviews/minute;
 this is not a sustainable rate or production capacity claim. This run did not
 collect CPU/memory, token/429, broker-lag, or multi-replica metrics.
 
-The first two-replica run, [Actions run 43163968560](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/43163968560),
-accepted 10/10 events and completed 9/10 reviews; the remaining workflow
-reached a terminal failure. That run did not preserve the failure detail in
-its load report, so the benchmark was updated to include Dapr's workflow error
-in future reports.
+The first two-replica run,
+[Actions run 43163968560](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/43163968560),
+accepted 10/10 events but completed 9/10 reviews. Its report did not yet
+preserve the failed workflow's error, so the benchmark was updated to include
+Dapr's workflow error in future reports. The next run,
+[43165236361](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/43165236361),
+completed 10/10 reviews, but the overall job stopped at browser dependency
+installation because `ubuntu-latest` resolved to Ubuntu 26.04, unsupported by
+Playwright 1.56.
 
-The follow-up, [Actions run 43165236361](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/43165236361),
-passed the capacity step with 10/10 reviews across two story-agent replicas:
-4.40 seconds total elapsed, 4.19 seconds mean latency, 4.39 seconds p50,
-4.40 seconds p95, and 136.37 completed reviews/minute. Ten nonterminal
-workflows were observed in one poll sample. The overall job later failed while
-installing the browser-test dependencies: `ubuntu-latest` resolved to Ubuntu
-26.04, which Playwright 1.56 does not support. Thus this run validates the
-two-replica capacity step, but not the remaining browser/recovery checks.
-The workflow now pins the runner to Ubuntu 24.04 for Playwright compatibility;
-that runner change still needs a complete follow-up validation.
+The workflow now pins Ubuntu 24.04. The complete follow-up,
+[Actions run 43166236233](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/43166236233),
+passed all Kind/Dapr, browser, approval, recovery, Redis, and publication
+checks. Its two-replica capacity step completed 10/10 reviews: 4.41 seconds
+total elapsed, 4.20 seconds mean latency, 4.41 seconds p50 and p95, and 135.91
+completed reviews/minute. Ten nonterminal workflows were observed in one poll
+sample.
 
 The historical one-replica and current two-replica results are single short
 bursts, not a controlled scaling comparison. Model-provider and hosted-runner
