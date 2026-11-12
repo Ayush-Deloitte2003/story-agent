@@ -8,12 +8,12 @@ from datetime import timedelta
 
 import dapr.ext.workflow as wf
 
-from app.agent import check_story_continuity
 from app.events import (
     parse_story_continuity_check_event,
     workflow_id_for_continuity_check_event,
 )
 from app.specialist_worker_app import create_specialist_app
+from app.specialist_agent_client import review_with_sidecar
 
 log = logging.getLogger("story-agent.specialist")
 runtime = wf.WorkflowRuntime()
@@ -42,7 +42,9 @@ def story_continuity_check_workflow(ctx: wf.DaprWorkflowContext, inp: dict):
 async def continuity_check_story(ctx: wf.WorkflowActivityContext, inp: dict) -> dict:
     log.info("continuity check started for %s", inp["title"])
     await asyncio.sleep(float(os.getenv("SPECIALIST_ACTIVITY_DELAY_SECONDS", "0")))
-    return await check_story_continuity(inp["title"], inp["story"], inp.get("request", ""))
+    return await review_with_sidecar(
+        inp["title"], inp["story"], inp.get("request", "")
+    )
 
 
 app = create_specialist_app(

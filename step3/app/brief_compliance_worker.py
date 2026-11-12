@@ -8,12 +8,12 @@ from datetime import timedelta
 
 import dapr.ext.workflow as wf
 
-from app.agent import review_story_brief_compliance
 from app.events import (
     parse_story_brief_compliance_event,
     workflow_id_for_brief_compliance_event,
 )
 from app.specialist_worker_app import create_specialist_app
+from app.specialist_agent_client import review_with_sidecar
 
 log = logging.getLogger("story-agent.specialist")
 runtime = wf.WorkflowRuntime()
@@ -45,7 +45,7 @@ def story_brief_compliance_workflow(ctx: wf.DaprWorkflowContext, inp: dict):
 async def brief_compliance_review_story(ctx: wf.WorkflowActivityContext, inp: dict) -> dict:
     log.info("brief-compliance review started for %s", inp["title"])
     await asyncio.sleep(float(os.getenv("SPECIALIST_ACTIVITY_DELAY_SECONDS", "0")))
-    return await review_story_brief_compliance(
+    return await review_with_sidecar(
         inp["title"], inp["story"], inp.get("request", "")
     )
 

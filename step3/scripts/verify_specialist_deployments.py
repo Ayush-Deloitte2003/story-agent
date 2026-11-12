@@ -1,12 +1,12 @@
-"""Verify specialist Deployment sidecars and their isolated Dapr subscriptions."""
+"""Verify agent and Dapr sidecars plus isolated specialist subscriptions."""
 
 import json
 import subprocess
 
 
 WORKERS = {
-    "continuity-worker": "story.continuity-check.requested",
-    "brief-compliance-worker": "story.brief-compliance.requested",
+    "continuity-worker": ("story.continuity-check.requested", "continuity-check"),
+    "brief-compliance-worker": ("story.brief-compliance.requested", "brief-compliance"),
 }
 
 
@@ -19,12 +19,21 @@ def kubectl(*args):
     ).stdout
 
 
-def verify(name, event_type):
+def verify(name, event_type, agent_name):
     deployment = json.loads(kubectl("get", "deployment", name, "-o", "json"))
     template = deployment["spec"]["template"]
     app_id = template["metadata"]["annotations"]["dapr.io/app-id"]
     if app_id != name:
         raise AssertionError(f"{name} has unexpected Dapr app ID {app_id!r}")
+    expected_containers = {name, f"{name.removesuffix('-worker')}-agent"}
+    template_containers = {
+        container["name"] for container in template["spec"]["containers"]
+    }
+    if not expected_containers.issubset(template_containers):
+        raise AssertionError(
+            f"{name} pod template is missing its workflow host or agent sidecar: "
+            f"{template_containers}"
+        )
 
     pods = json.loads(kubectl("get", "pod", "-l", f"app={name}", "-o", "json"))["items"]
     ready_pods = []
@@ -38,14 +47,17 @@ def verify(name, event_type):
         raise AssertionError(f"{name} has no pod with all containers ready")
     pod = max(ready_pods, key=lambda item: item["metadata"]["creationTimestamp"])
     containers = {item["name"] for item in pod["spec"]["containers"]}
-    if not {name, "daprd"}.issubset(containers):
-        raise AssertionError(f"{name} pod is missing its app or Dapr sidecar: {containers}")
+    if not expected_containers.issubset(containers) or "daprd" not in containers:
+        raise AssertionError(
+            f"{name} pod is missing its workflow host, agent, or Dapr sidecar: "
+            f"{containers}"
+        )
     readiness = {
         item["name"]: item.get("ready", False)
         for item in pod.get("status", {}).get("containerStatuses", [])
     }
-    if not readiness.get(name) or not readiness.get("daprd"):
-        raise AssertionError(f"{name} app and sidecar are not both ready: {readiness}")
+    if not all(readiness.get(container) for container in expected_containers | {"daprd"}):
+        raise AssertionError(f"{name} containers are not all ready: {readiness}")
 
     code = (
         "import json,urllib.request;"
@@ -66,9 +78,20 @@ def verify(name, event_type):
         or rules != [expected]
     ):
         raise AssertionError(f"{name} does not have an isolated {event_type} subscription: {subscription}")
-    print(f"[PASS] {name} has a ready daprd sidecar and subscribes only to {event_type}")
+    health = json.loads(kubectl(
+        "exec", f"pod/{pod['metadata']['name']}", "-c", name, "--",
+        "python", "-c",
+        "import json,urllib.request;print(json.dumps(json.load(urllib.request.urlopen('http://127.0.0.1:8100/healthz'))))",
+    ))
+    if health != {"status": "ok", "agent": agent_name}:
+        raise AssertionError(f"{name} agent sidecar health check failed: {health}")
+    agent_container_name = name.removesuffix("-worker") + "-agent"
+    print(
+        f"[PASS] {name} pod has ready workflow-host, {agent_container_name} agent sidecar, "
+        f"and daprd containers; subscribes only to {event_type}"
+    )
 
 
 if __name__ == "__main__":
-    for worker, assigned_event in WORKERS.items():
-        verify(worker, assigned_event)
+    for worker, (assigned_event, agent_name) in WORKERS.items():
+        verify(worker, assigned_event, agent_name)
