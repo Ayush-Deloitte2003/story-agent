@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 APP_URL = os.getenv("APP_URL", "http://127.0.0.1:8000").rstrip("/")
 WORKFLOW_COUNT = 10
+APP_REPLICAS = os.getenv("APP_REPLICAS", "1")
 POLL_INTERVAL_SECONDS = 2
 MAX_DURATION_SECONDS = 600
 REPORT = ROOT / "verify_output_step3_kind_load.txt"
@@ -91,8 +92,9 @@ def main():
         "Quality-review workflow concurrency baseline",
         f"Started: {datetime.now(timezone.utc).isoformat()}",
         f"Target independent workflows: {WORKFLOW_COUNT}",
+        f"Story-agent deployment replicas: {APP_REPLICAS}",
         f"App URL: {APP_URL}",
-        "Submission mode: simultaneous webhook burst; one app replica in the Kind demo",
+        "Submission mode: simultaneous webhook burst; real model-backed reviews",
         "",
     ]
     overall_started = time.monotonic()

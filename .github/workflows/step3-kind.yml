@@ -71,8 +71,17 @@ jobs:
           python scripts/verify_step3.py run
           python scripts/verify_event_intake.py
 
-      - name: Quality-review concurrency baseline (10 workflows)
-        run: python scripts/verify_quality_review_load.py
+      - name: Quality-review concurrency baseline (10 workflows, two app replicas)
+        run: |
+          set -euo pipefail
+          trap 'kubectl scale deployment/story-agent --replicas=1 >/dev/null 2>&1 || true' EXIT
+          kubectl scale deployment/story-agent --replicas=2
+          kubectl rollout status deployment/story-agent --timeout=300s
+          test "$(kubectl get pods -l app=story-agent -o jsonpath='{.items[*].metadata.name}' | wc -w)" -eq 2
+          APP_REPLICAS=2 python scripts/verify_quality_review_load.py
+          kubectl scale deployment/story-agent --replicas=1
+          kubectl rollout status deployment/story-agent --timeout=300s
+          trap - EXIT
 
       - name: Install browser test dependencies
         run: |

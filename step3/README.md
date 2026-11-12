@@ -131,16 +131,27 @@ The manual Kind workflow includes a 10-workflow quality-review concurrency
 baseline. It submits ten independent review events together, samples their
 nonterminal workflow count while polling, and reports completion rate, elapsed
 time, mean/p50/p95 completion latency, and observed completion throughput in
-`verify_output_step3_kind_load.txt`. This is a small baseline on one app
-replica, not proof of production capacity or a CPU/memory benchmark. It runs
-real model calls and may encounter provider rate limits; do not interpret a
-failed run as evidence that workflow state was lost.
-The first baseline passed in [Actions run 41995787239](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/41995787239):
+`verify_output_step3_kind_load.txt`. The current run scales `story-agent` to
+two replicas for this batch, then restores one replica for subsequent checks.
+The test uses real model calls and holds the offered concurrency to the
+previously validated ten-event burst while provider quotas are unknown. This
+is a bounded horizontal-scale datapoint, not proof of production capacity or
+a CPU/memory benchmark. It may encounter provider rate limits; do not
+interpret a failed run as evidence that workflow state was lost.
+
+The historical single-replica baseline passed in
+[Actions run 41995787239](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/41995787239):
 10/10 events completed; ten active workflows were observed in a poll sample;
 total elapsed time was 4.70s, mean latency 4.28s, p50 4.69s, and p95 4.70s.
 The short-burst throughput calculation was 127.69 completed reviews/minute;
 this is not a sustainable rate or production capacity claim. This run did not
 collect CPU/memory, token/429, broker-lag, or multi-replica metrics.
+
+The two-replica measurement is pending a new Kind/Dapr Actions run; do not
+report a scale-out result until that run completes successfully. The $10 test
+budget bounds the intended provider usage, but GitHub Actions cannot enforce
+an exact dollar ceiling on OpenAI billing. The current guard is the fixed
+ten-event batch and the reviewer workflow's bounded retry policy.
 
 The short baseline is retained as historical evidence. It does not answer
 whether Dapr scales better than DBOS or Temporal. A meaningful comparison must
