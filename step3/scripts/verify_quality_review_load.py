@@ -153,6 +153,7 @@ def main():
                             "status": status,
                             "elapsed_seconds": time.monotonic() - pending[event_id]["started"],
                             "has_review": valid_review,
+                            "error": state.get("error"),
                         }
                         del pending[event_id]
                     else:
@@ -182,6 +183,9 @@ def main():
             ])
         for event_id, item in terminal.items():
             lines.append(f"[{item['status'].upper()}] {event_id}: {item['elapsed_seconds']:.2f}s")
+            if item["error"]:
+                error = " ".join(str(item["error"]).split())
+                lines.append(f"  Error: {error[:500]}")
         for event_id, run in pending.items():
             lines.append(f"[UNRESOLVED] {event_id}: {run.get('last_poll_error', 'workflow did not finish')}")
 
