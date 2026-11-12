@@ -133,9 +133,12 @@ and check that the host subscribes only to its assigned topic event. Together
 these checks demonstrate literal agent sidecar containers, Dapr sidecars, and
 workflow recovery in Kind, not production HA or capacity.
 Full Kind/Dapr verification passed in
-[Actions run 42000395917](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/42000395917),
-including these specialist checks and the existing approval, restart,
-publisher-recovery, and ten-workflow baseline checks.
+[Actions run 43181812223](https://github.com/Ayush-Deloitte2003/story-agent/actions/runs/43181812223):
+both pods reached 3/3 Ready containers; the deployment check confirmed the
+agent containers' health endpoints and isolated subscriptions; both specialist
+workflows completed and recovered after pod replacement. The run also passed
+the approval, restart, publisher-recovery, browser, and ten-workflow baseline
+checks.
 
 The manual Kind workflow includes a 10-workflow quality-review concurrency
 baseline. It submits ten independent review events together, samples their
