@@ -44,6 +44,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:test@localhost:5432/flights
           REQUIRE_POSTGRES_TESTS: "1"
+          REQUIRE_NODE_TESTS: "1"
         run: python -m unittest discover -s tests -v
       - name: Create Kind cluster
         uses: helm/kind-action@v1

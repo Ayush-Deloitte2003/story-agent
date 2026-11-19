@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Step 4 reviewer UI (simulated flight booking)</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f4f5f7; color: #1b1f24; }
+  header { background: #0b3d91; color: #fff; padding: 12px 20px; }
+  header h1 { font-size: 1.1rem; margin: 0; }
+  .banner { background: #fff3cd; border-bottom: 1px solid #e0c36a; padding: 8px 20px; font-size: .85rem; }
+  main { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; padding: 16px 20px; }
+  section { background: #fff; border: 1px solid #d5d9e0; border-radius: 6px; padding: 12px 14px; }
+  h2 { font-size: 1rem; margin: 0 0 8px; }
+  label { display: block; font-size: .8rem; margin-top: 6px; }
+  input, select, textarea { width: 100%; box-sizing: border-box; padding: 5px; font: inherit; }
+  button { margin-top: 8px; margin-right: 6px; padding: 5px 10px; cursor: pointer; }
+  button:disabled { cursor: not-allowed; opacity: .5; }
+  pre { background: #f0f2f5; padding: 6px; overflow: auto; font-size: .75rem; white-space: pre-wrap; word-break: break-word; }
+  .badge { display: inline-block; border-radius: 10px; padding: 1px 8px; font-size: .75rem; background: #dde3ee; }
+  .badge.good { background: #cdeed5; } .badge.warn { background: #fde7b0; } .badge.bad { background: #f6c9c9; }
+  .item { border-top: 1px solid #e3e6eb; margin-top: 8px; padding-top: 6px; }
+  .muted { color: #5b6470; font-size: .8rem; }
+  .err { color: #a11; font-size: .85rem; }
+</style>
+</head>
+<body>
+<header><h1>Step 4 reviewer UI &mdash; simulated flight booking</h1></header>
+<div class="banner">
+  Simulated mode: no real airline, payment provider or card data, and no authentication.
+  Recent bookings are kept <strong>in this browser only</strong> (localStorage); the server keeps no history for this page.
+  A human decision is still required for every booking, rebooking and cancellation.
+</div>
+<main>
+  <section id="booking-section">
+    <h2>Create a booking</h2>
+    <label>Flight <select id="b-flight"></select></label>
+    <label>Seat <input id="b-seat" value="12A" maxlength="8"></label>
+    <label>Passenger name <input id="b-name" value="Demo Traveller" maxlength="120"></label>
+    <label>Idempotency key <input id="b-key" maxlength="200"></label>
+    <button id="b-new-key" type="button">New key</button>
+    <button id="b-submit" type="button">Book</button>
+    <div id="b-msg" class="muted"></div>
+    <h2 style="margin-top:12px">Booking status</h2>
+    <label>Recent bookings (this browser) <select id="b-recent"></select></label>
+    <button id="b-refresh" type="button">Refresh</button>
+    <button id="b-forget" type="button">Forget selected</button>
+    <div id="b-status" class="muted">No booking selected.</div>
+    <pre id="b-json" hidden></pre>
+  </section>
+
+  <section id="inbox-section">
+    <h2>Approval inbox <span id="inbox-state" class="muted"></span></h2>
+    <button id="inbox-refresh" type="button">Refresh</button>
+    <div id="inbox"></div>
+  </section>
+
+  <section id="cancel-section">
+    <h2>Request a cancellation</h2>
+    <p class="muted">Needs a confirmed booking. The refund amount appears in the inbox for approval.</p>
+    <label>Booking id <input id="c-booking" maxlength="100"></label>
+    <label>Idempotency key <input id="c-key" maxlength="200"></label>
+    <button id="c-new-key" type="button">New key</button>
+    <button id="c-submit" type="button">Request cancellation</button>
+    <div id="c-msg" class="muted"></div>
+  </section>
+
+  <section id="feed-section">
+    <h2>Disruption and ops feed</h2>
+    <button id="f-refresh" type="button">Refresh status</button>
+    <div id="f-status" class="muted">Not loaded.</div>
+    <h2 style="margin-top:12px">Seed a simulated feed event</h2>
+    <p class="muted">Works only when the server runs with OPS_FEED_SIMULATION=true and the poller is enabled; otherwise the server answers 404.</p>
+    <label>Flight <select id="f-flight"></select></label>
+    <label>Status <select id="f-state"><option>cancelled</option><option>delayed</option><option>on_time</option></select></label>
+    <label>Delay minutes (for delayed) <input id="f-delay" type="number" min="0" value="90"></label>
+    <button id="f-seed" type="button">Seed event</button>
+    <div id="f-msg" class="muted"></div>
+    <h2 style="margin-top:12px">Manual disruption</h2>
+    <label>Booking id <input id="d-booking" maxlength="100"></label>
+    <label>Flight id <input id="d-flight" maxlength="40"></label>
+    <button id="d-submit" type="button">Submit disruption</button>
+    <div id="d-msg" class="muted"></div>
+  </section>
+
+  <section id="support-section">
+    <h2>Support question (command only)</h2>
+    <p class="muted">The support service is a separate read-only deployment, so this page does not call it.
+      Port-forward it (<code>kubectl port-forward svc/support-service 8001:8000</code>) and run the command below.
+      Do not put personal data in the question; scrubbing is best effort.</p>
+    <label>Booking id <input id="s-booking" maxlength="100"></label>
+    <label>Question <textarea id="s-question" rows="2" maxlength="500">Can I cancel and get a refund?</textarea></label>
+    <button id="s-build" type="button">Build command</button>
+    <pre id="s-cmd"></pre>
+  </section>
+</main>
+
+<script>
+/* LOGIC-START (pure functions, exercised by tests/test_ui.py) */
+const RECENT_KEY = "step4.recentBookings";
+const MAX_RECENT = 10;
+
+function newKey(prefix, rand) {
+  return prefix + "-" + (rand || Math.random().toString(36).slice(2, 10)) + "-" + Date.now().toString(36);
+}
+
+function formatCountdown(expiresAt, nowMs) {
+  const end = Date.parse(expiresAt);
+  if (Number.isNaN(end)) return "unknown";
+  const left = Math.floor((end - nowMs) / 1000);
+  if (left <= 0) return "expired";
+  const m = Math.floor(left / 60), s = left % 60;
+  return m + "m " + String(s).padStart(2, "0") + "s";
+}
+
+function lifecycle(data) {
+  const booking = (data && data.booking) || {};
+  const workflow = (data && data.workflow) || {};
+  const status = String(booking.status || "unknown");
+  const runtime = String(workflow.runtime_status || "unknown");
+  let tone = "warn";
+  if (["confirmed", "cancelled", "rebooked", "COMPLETED"].includes(status)) tone = "good";
+  if (["failed", "expired", "rejected", "compensated"].includes(status)) tone = "bad";
+  return { status: status, runtime: runtime, tone: tone };
+}
+
+function decisionPayload(item, decision, flightId) {
+  const body = { decision: decision };
+  if (item.kind === "cancellation" && decision === "approve") {
+    body.request_hash = item.proposal.request_hash;
+    body.refund_cents = item.proposal.refund_cents;
+  }
+  if (item.kind === "rebooking" && decision === "approve") {
+    if (!flightId) throw new Error("Choose an alternative flight first");
+    body.flight_id = flightId;
+  }
+  return body;
+}
+
+function shellQuote(text) {
+  return "'" + String(text).replace(/'/g, "'\\''") + "'";
+}
+
+function supportCommand(bookingId, question) {
+  const body = JSON.stringify({ booking_id: bookingId, question: question });
+  return "curl -s -X POST http://127.0.0.1:8001/support/ask -H 'Content-Type: application/json' -d " + shellQuote(body);
+}
+
+function loadRecent(storage) {
+  try {
+    const parsed = JSON.parse(storage.getItem(RECENT_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.filter(x => typeof x === "string").slice(0, MAX_RECENT) : [];
+  } catch (e) { return []; }
+}
+
+function rememberBooking(storage, id) {
+  const list = [id].concat(loadRecent(storage).filter(x => x !== id)).slice(0, MAX_RECENT);
+  try { storage.setItem(RECENT_KEY, JSON.stringify(list)); } catch (e) { /* storage unavailable */ }
+  return list;
+}
+
+function forgetBooking(storage, id) {
+  const list = loadRecent(storage).filter(x => x !== id);
+  try { storage.setItem(RECENT_KEY, JSON.stringify(list)); } catch (e) { /* storage unavailable */ }
+  return list;
+}
+
+function makeLatest() {
+  let seq = 0;
+  return { next: () => ++seq, isCurrent: (n) => n === seq };
+}
+/* LOGIC-END */
+
+const $ = (id) => document.getElementById(id);
+function el(tag, text, cls) {
+  const node = document.createElement(tag);
+  if (text !== undefined) node.textContent = String(text);
+  if (cls) node.className = cls;
+  return node;
+}
+function badge(text, tone) { return el("span", text, "badge " + (tone || "")); }
+
+async function api(method, path, body, headers) {
+  const init = { method: method, headers: Object.assign({}, headers || {}) };
+  if (body !== undefined) { init.body = JSON.stringify(body); init.headers["Content-Type"] = "application/json"; }
+  const response = await fetch(path, init);
+  let data = null;
+  try { data = await response.json(); } catch (e) { /* non-JSON body */ }
+  return { ok: response.ok, status: response.status, data: data };
+}
+
+function detail(data) {
+  if (!data) return "no response";
+  const d = data.detail;
+  return typeof d === "string" ? d : JSON.stringify(d || data);
+}
+
+function busy(button, work) {
+  button.disabled = true;
+  return Promise.resolve().then(work).finally(() => { button.disabled = false; });
+}
+
+async function loadFlights() {
+  const r = await api("GET", "/flights");
+  if (!r.ok) { $("b-msg").textContent = "Could not load flights: " + r.status; return; }
+  const flights = r.data.flights;
+  for (const select of [$("b-flight"), $("f-flight")]) {
+    select.replaceChildren();
+    for (const id of Object.keys(flights)) {
+      const f = flights[id];
+      const option = el("option", id + " " + f.origin + "->" + f.destination);
+      option.value = id;
+      select.appendChild(option);
+    }
+  }
+}
+
+const bookingLatest = makeLatest();
+async function refreshBooking() {
+  const id = $("b-recent").value;
+  if (!id) { $("b-status").textContent = "No booking selected."; $("b-json").hidden = true; return; }
+  const n = bookingLatest.next();
+  let r;
+  try { r = await api("GET", "/bookings/" + encodeURIComponent(id)); }
+  catch (e) { if (bookingLatest.isCurrent(n)) $("b-status").textContent = "Network error; will retry."; return; }
+  if (!bookingLatest.isCurrent(n)) return;
+  const box = $("b-status");
+  box.replaceChildren();
+  if (r.status === 404) {
+    box.appendChild(el("span", "Booking not found on the server (it may be from another environment). Use 'Forget selected' to remove it.", "err"));
+    $("b-json").hidden = true;
+    return;
+  }
+  if (!r.ok) { box.appendChild(el("span", "Status unavailable (" + r.status + "): " + detail(r.data) + ". Showing no stale data; retrying.", "err")); return; }
+  const life = lifecycle(r.data);
+  box.appendChild(badge(life.status, life.tone));
+  box.appendChild(document.createTextNode(" workflow: "));
+  box.appendChild(badge(life.runtime, ""));
+  $("b-json").hidden = false;
+  $("b-json").textContent = JSON.stringify(r.data, null, 2);
+  for (const target of ["c-booking", "d-booking", "s-booking"]) $(target).value = $(target).value || id;
+}
+
+function renderRecent(list, selected) {
+  const select = $("b-recent");
+  select.replaceChildren();
+  for (const id of list) { const o = el("option", id); o.value = id; select.appendChild(o); }
+  if (selected && list.includes(selected)) select.value = selected;
+}
+
+async function submitBooking() {
+  const flight = $("b-flight").value, seat = $("b-seat").value.trim(), name = $("b-name").value.trim();
+  const key = $("b-key").value.trim() || newKey("ui-book");
+  $("b-key").value = key;
+  const r = await api("POST", "/bookings", { flight_id: flight, seat: seat, passenger_name: name }, { "Idempotency-Key": key });
+  const msg = $("b-msg");
+  if (r.status === 202) {
+    msg.textContent = "Accepted (" + r.data.status + "): " + r.data.booking_id + ". Same key and payload returns the same booking; a changed payload returns 409.";
+    renderRecent(rememberBooking(localStorage, r.data.booking_id), r.data.booking_id);
+    await refreshBooking();
+  } else {
+    msg.textContent = "Rejected (" + r.status + "): " + detail(r.data);
+  }
+}
+
+const inboxLatest = makeLatest();
+const decided = new Set();
+let inboxItems = [];
+async function refreshInbox() {
+  const n = inboxLatest.next();
+  let r;
+  try { r = await api("GET", "/inbox"); }
+  catch (e) { if (inboxLatest.isCurrent(n)) $("inbox-state").textContent = "(network error, showing last data)"; return; }
+  if (!inboxLatest.isCurrent(n)) return;
+  if (!r.ok) { $("inbox-state").textContent = "(error " + r.status + ", showing last data)"; return; }
+  $("inbox-state").textContent = "";
+  inboxItems = r.data.items || [];
+  renderInbox();
+}
+
+function field(label, value) {
+  const p = el("div", undefined, "muted");
+  p.appendChild(el("strong", label + ": "));
+  p.appendChild(document.createTextNode(String(value)));
+  return p;
+}
+
+function renderInbox() {
+  const root = $("inbox");
+  root.replaceChildren();
+  if (!inboxItems.length) { root.appendChild(el("div", "No pending approvals.", "muted")); return; }
+  for (const item of inboxItems) {
+    const box = el("div", undefined, "item");
+    const p = item.proposal || {};
+    box.appendChild(badge(item.kind, ""));
+    box.appendChild(document.createTextNode(" booking " + item.booking_id + " "));
+    const countdown = el("span", formatCountdown(item.expires_at, Date.now()), "badge warn countdown");
+    countdown.dataset.expires = item.expires_at;
+    box.appendChild(countdown);
+    if (item.kind === "cancellation") {
+      box.appendChild(field("Refund (cents)", p.refund_cents));
+      box.appendChild(field("Fare rule", p.fare_rule));
+      box.appendChild(field("Request hash", p.request_hash));
+    }
+    let flightSelect = null;
+    if (item.kind === "rebooking" && Array.isArray(p.alternatives)) {
+      flightSelect = document.createElement("select");
+      for (const alt of p.alternatives) { const o = el("option", alt.flight_id); o.value = alt.flight_id; flightSelect.appendChild(o); }
+      box.appendChild(flightSelect);
+    }
+    if (p.fare_advice) box.appendChild(field("Fare advice", JSON.stringify(p.fare_advice.ranked_flight_ids) + " - " + (p.fare_advice.summary || "")));
+    if (p.payment_advice) box.appendChild(field("Payment-risk note", JSON.stringify(p.payment_advice)));
+    box.appendChild(el("pre", JSON.stringify(p, null, 2)));
+    const isDone = decided.has(item.workflow_id);
+    for (const decision of ["approve", "reject"]) {
+      const button = el("button", decision === "approve" ? "Approve" : "Reject");
+      button.type = "button";
+      button.disabled = isDone;
+      button.addEventListener("click", () => busy(button, async () => {
+        let body;
+        try { body = decisionPayload(item, decision, flightSelect && flightSelect.value); }
+        catch (e) { alert(e.message); return; }
+        const r = await api("POST", "/inbox/" + encodeURIComponent(item.workflow_id) + "/decision", body);
+        if (r.ok) { decided.add(item.workflow_id); }
+        else { alert("Decision rejected (" + r.status + "): " + detail(r.data)); }
+        await refreshInbox();
+        await refreshBooking();
+      }));
+      box.appendChild(button);
+    }
+    if (isDone) box.appendChild(el("span", "decision recorded", "muted"));
+    root.appendChild(box);
+  }
+}
+
+function tickCountdowns() {
+  for (const node of document.querySelectorAll(".countdown")) {
+    node.textContent = formatCountdown(node.dataset.expires, Date.now());
+  }
+}
+
+async function submitCancellation() {
+  const booking = $("c-booking").value.trim();
+  const key = $("c-key").value.trim() || newKey("ui-cancel");
+  $("c-key").value = key;
+  const r = await api("POST", "/cancellations", { booking_id: booking }, { "Idempotency-Key": key });
+  $("c-msg").textContent = r.status === 202
+    ? "Accepted (" + r.data.status + "): " + r.data.cancellation_id + ". Approve it in the inbox."
+    : "Rejected (" + r.status + "): " + detail(r.data);
+  if (r.status === 202) await refreshInbox();
+}
+
+async function refreshFeed() {
+  const r = await api("GET", "/ops-feed/status");
+  const box = $("f-status");
+  box.replaceChildren();
+  if (!r.ok) { box.textContent = "Unavailable (" + r.status + ")."; return; }
+  box.appendChild(document.createTextNode("Poller " + (r.data.enabled ? "enabled" : "disabled") + ". Cursor: " + JSON.stringify(r.data.cursor) + ". "));
+  box.appendChild(el("pre", JSON.stringify(r.data.counters, null, 2)));
+}
+
+async function seedFeed() {
+  const row = { source_event_id: newKey("ui-feed"), flight_id: $("f-flight").value, status: $("f-state").value };
+  if (row.status === "delayed") row.delay_minutes = Number($("f-delay").value) || 0;
+  const r = await api("POST", "/simulation/ops-feed", row);
+  $("f-msg").textContent = r.status === 202 ? "Seeded (" + r.data.status + "). Watch the inbox." :
+    r.status === 404 ? "Simulation is disabled on this server (expected unless OPS_FEED_SIMULATION=true)." :
+    "Rejected (" + r.status + "): " + detail(r.data);
+}
+
+async function submitDisruption() {
+  const event = { id: newKey("ui-disruption"), source: "step4-ui", booking_id: $("d-booking").value.trim(), flight_id: $("d-flight").value.trim() };
+  const r = await api("POST", "/disruptions", event);
+  $("d-msg").textContent = r.status === 202 ? "Result: " + r.data.status + (r.data.reason ? " (" + r.data.reason + ")" : "") + ". Approve any rebooking in the inbox."
+    : "Rejected (" + r.status + "): " + detail(r.data);
+}
+
+function init() {
+  renderRecent(loadRecent(localStorage));
+  $("b-key").value = newKey("ui-book");
+  $("c-key").value = newKey("ui-cancel");
+  $("b-new-key").onclick = () => { $("b-key").value = newKey("ui-book"); };
+  $("c-new-key").onclick = () => { $("c-key").value = newKey("ui-cancel"); };
+  $("b-submit").onclick = () => busy($("b-submit"), submitBooking);
+  $("b-refresh").onclick = () => busy($("b-refresh"), refreshBooking);
+  $("b-recent").onchange = refreshBooking;
+  $("b-forget").onclick = () => { renderRecent(forgetBooking(localStorage, $("b-recent").value)); refreshBooking(); };
+  $("inbox-refresh").onclick = () => busy($("inbox-refresh"), refreshInbox);
+  $("c-submit").onclick = () => busy($("c-submit"), submitCancellation);
+  $("f-refresh").onclick = () => busy($("f-refresh"), refreshFeed);
+  $("f-seed").onclick = () => busy($("f-seed"), seedFeed);
+  $("d-submit").onclick = () => busy($("d-submit"), submitDisruption);
+  $("s-build").onclick = () => { $("s-cmd").textContent = supportCommand($("s-booking").value.trim(), $("s-question").value); };
+  loadFlights();
+  refreshBooking(); refreshInbox(); refreshFeed();
+  setInterval(tickCountdowns, 1000);
+  setInterval(() => { refreshInbox(); refreshBooking(); }, 5000);
+}
+if (typeof document !== "undefined" && document.getElementById("inbox")) init();
+</script>
+</body>
+</html>

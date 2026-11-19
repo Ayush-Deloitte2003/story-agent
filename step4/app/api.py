@@ -8,7 +8,10 @@ import urllib.error
 import urllib.request
 from contextlib import asynccontextmanager
 
+from pathlib import Path
+
 from fastapi import Body, FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 
 from app import dispatcher, feed_poller
 from app.contracts import (
@@ -19,6 +22,7 @@ from app.events import Accepted, classify
 from app.store import PostgresStore
 
 store = PostgresStore()
+UI_PAGE = Path(__file__).parent / "static" / "index.html"
 DAPR_PORT = os.getenv("DAPR_HTTP_PORT", "3500")
 FAILURE_INJECTION_ENABLED = os.getenv("ENABLE_FAILURE_INJECTION", "false").lower() == "true"
 DISPATCH_INTERVAL_SECONDS = float(os.getenv("DISPATCH_INTERVAL_SECONDS", "2"))
@@ -109,6 +113,12 @@ def _invoke(app_id: str, method: str, body: dict | None = None, http_method: str
 def healthz():
     store.ping()
     return {"status": "ok"}
+
+
+@app.get("/ui", response_class=HTMLResponse)
+def reviewer_ui():
+    """Static reviewer page; contains no data and calls only existing endpoints."""
+    return HTMLResponse(UI_PAGE.read_text(encoding="utf-8"))
 
 
 @app.get("/flights")

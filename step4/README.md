@@ -306,6 +306,41 @@ scrubbed question would be sent to the model provider. Both new advisors are moc
 by default, honour `LLM_REQUEST_LIMIT` like the others, and are not covered by the
 tagged live smoke.
 
+## Reviewer UI
+
+`flight-api` serves one static page at `GET /ui` (no build step, no framework, no
+new service). Open it locally with `uvicorn app.api:app` (needs `DATABASE_URL`,
+and a Dapr sidecar for workflow status), or in Kind with
+`kubectl port-forward svc/flight-api 8000:8000` and `http://127.0.0.1:8000/ui`.
+It calls only existing endpoints:
+
+- **Booking:** pick a flight, seat and name; the page generates an idempotency key
+  and shows the 202 response, then polls the booking and workflow status.
+- **Approval inbox:** pending items with the proposal, fare advice, payment-risk
+  note, an expiry countdown and Approve/Reject buttons. Cancellation approvals
+  send the item's `request_hash` and `refund_cents`; rebooking approvals send the
+  chosen alternative flight. Buttons are disabled in flight and after a decision.
+- **Cancellation:** requests a cancellation; the refund amount is approved in the inbox.
+- **Disruption and ops feed:** shows `/ops-feed/status` (cursor and counters,
+  including the quarantined count), seeds a simulated feed event (404 unless
+  `OPS_FEED_SIMULATION=true`), and submits a manual disruption.
+- **Support:** shows a copyable `curl` command and a port-forward hint for
+  `support-service`; the page never calls it. Question scrubbing is best effort.
+
+Recent booking IDs are stored in this browser's `localStorage` only; the server keeps
+no history for the page. A stored ID that now returns 404 shows a message and can be
+forgotten. All API text is rendered with `textContent`. The page adds no authority
+and has no authentication; humans still approve every booking, rebooking and
+cancellation. There is no quarantine view because no endpoint exposes quarantined
+events.
+
+Validated: `tests/test_ui.py` (served route, no `innerHTML`/external resources,
+existing endpoints only, and the page's JavaScript logic under Node, which was skipped
+locally because Node is not installed and is required only in GitHub Actions), and
+a GitHub Actions check that `/ui` loads. Not validated: layout, countdown behavior
+and real-browser interaction need a person to open the page; nothing was run on a
+local cluster.
+
 ## Run and verify
 
 From the repository root, enter `step4\`, then use Python 3.12+:

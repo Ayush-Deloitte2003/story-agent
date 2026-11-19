@@ -235,6 +235,12 @@ def main():
     request("GET", "/healthz")
     print("[PASS] API and PostgreSQL are ready")
 
+    with urllib.request.urlopen(BASE + "/ui", timeout=15) as page:
+        html = page.read().decode()
+        assert page.status == 200 and "text/html" in page.headers["Content-Type"], page.status
+        assert "Step 4 reviewer UI" in html and "innerHTML" not in html
+    print("[PASS] Reviewer UI page is served (layout needs a human check)")
+
     happy = submit("booking-idempotency", "SA101", "1A")
     duplicate = submit("booking-idempotency", "SA101", "1A")
     assert happy["booking_id"] == duplicate["booking_id"], "Retry created another booking"
