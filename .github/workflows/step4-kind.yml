@@ -1,0 +1,69 @@
+name: step4-kind
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CLUSTER: flight-booking
+  DAPR_CLI_VERSION: 1.18.2
+  DAPR_RUNTIME_VERSION: 1.19.0
+
+jobs:
+  kind:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: step4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Step 4 dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Deterministic contract tests
+        run: python -m unittest discover -s tests -v
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ${{ env.CLUSTER }}
+      - name: Install Dapr
+        run: |
+          wget -q https://raw.githubusercontent.com/dapr/cli/master/install/install.sh -O - | /bin/bash -s "$DAPR_CLI_VERSION"
+          dapr init -k --runtime-version "$DAPR_RUNTIME_VERSION" --wait --timeout 600
+          dapr status -k
+      - name: Build and load simulated flight image
+        run: |
+          docker build -t flight-booking:dev .
+          kind load docker-image flight-booking:dev --name "$CLUSTER"
+      - name: Deploy Step 4
+        run: |
+          kubectl apply -f k8s/redis.yaml -f k8s/postgres.yaml
+          kubectl rollout status deployment/step4-redis --timeout=180s
+          kubectl rollout status deployment/step4-postgres --timeout=180s
+          kubectl apply -f k8s/components.yaml -f k8s/subscription.yaml -f k8s/apps.yaml
+          for d in flight-api booking-worker disruption-worker; do kubectl rollout status "deployment/$d" --timeout=300s; done
+          kubectl get pods
+      - name: Verify APIs, failures, recovery, and rebooking
+        run: |
+          set -euo pipefail
+          kubectl port-forward svc/flight-api 8000:8000 >/tmp/step4-port-forward.log 2>&1 &
+          pf_pid=$!
+          trap 'kill "$pf_pid" 2>/dev/null || true' EXIT
+          for _ in {1..30}; do
+            curl --fail --silent http://127.0.0.1:8000/healthz >/dev/null && break
+            sleep 2
+          done
+          python scripts/verify_step4.py
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl get pods -A
+          kubectl logs deployment/flight-api --all-containers --tail=150 || true
+          kubectl logs deployment/booking-worker --all-containers --tail=150 || true
+          kubectl logs deployment/disruption-worker --all-containers --tail=150 || true

@@ -163,3 +163,12 @@ Run this before switching from one step's demo to another if a window is still o
 
 The folders `step1`, `step2` and `step3` hold the project as it was at the end of
 each step; their own READMEs explain the code.
+
+## Step 4: simulated flight booking
+
+`step4\` is an isolated Dapr flight-booking MVP with durable booking and
+disruption/rebooking workflows, a human approval inbox, PostgreSQL domain
+records, mock inventory and payment, compensation, and bounded deterministic
+advisor sidecars. It makes no real bookings or payments and uses no model
+provider. See [`step4/README.md`](step4/README.md) for API examples and the
+manual `step4-kind` GitHub Actions validation workflow.

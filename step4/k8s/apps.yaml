@@ -1,0 +1,134 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flight-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: flight-api }
+  template:
+    metadata:
+      labels: { app: flight-api }
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "flight-api"
+        dapr.io/app-port: "8000"
+    spec:
+      containers:
+        - name: api
+          image: flight-booking:dev
+          imagePullPolicy: Never
+          command: ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8000"]
+          env:
+            - { name: DATABASE_URL, value: "postgresql://flights:local-kind-only@step4-postgres:5432/flights" }
+            - { name: ENABLE_FAILURE_INJECTION, value: "true" }
+          ports: [{ containerPort: 8000 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flight-api
+spec:
+  selector: { app: flight-api }
+  ports: [{ port: 8000, targetPort: 8000 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: booking-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: booking-worker }
+  template:
+    metadata:
+      labels: { app: booking-worker }
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "booking-worker"
+        dapr.io/app-port: "8000"
+    spec:
+      containers:
+        - name: worker
+          image: flight-booking:dev
+          imagePullPolicy: Never
+          command: ["uvicorn", "app.booking_worker:app", "--host", "0.0.0.0", "--port", "8000"]
+          env:
+            - { name: DATABASE_URL, value: "postgresql://flights:local-kind-only@step4-postgres:5432/flights" }
+            - { name: BOOKING_ADVISOR_URL, value: "http://127.0.0.1:8101/advise" }
+          ports: [{ containerPort: 8000 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            periodSeconds: 5
+        - name: booking-advisor
+          image: flight-booking:dev
+          imagePullPolicy: Never
+          command: ["uvicorn", "app.booking_advisor:app", "--host", "127.0.0.1", "--port", "8101"]
+          ports: [{ containerPort: 8101 }]
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8101/healthz', timeout=2)"
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: booking-worker
+spec:
+  selector: { app: booking-worker }
+  ports: [{ port: 80, targetPort: 8000 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: disruption-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: disruption-worker }
+  template:
+    metadata:
+      labels: { app: disruption-worker }
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "disruption-worker"
+        dapr.io/app-port: "8000"
+    spec:
+      containers:
+        - name: worker
+          image: flight-booking:dev
+          imagePullPolicy: Never
+          command: ["uvicorn", "app.disruption_worker:app", "--host", "0.0.0.0", "--port", "8000"]
+          env:
+            - { name: DATABASE_URL, value: "postgresql://flights:local-kind-only@step4-postgres:5432/flights" }
+            - { name: ADVISOR_URL, value: "http://127.0.0.1:8100/recommend" }
+          ports: [{ containerPort: 8000 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            periodSeconds: 5
+        - name: flight-advisor
+          image: flight-booking:dev
+          imagePullPolicy: Never
+          command: ["uvicorn", "app.advisor:app", "--host", "127.0.0.1", "--port", "8100"]
+          ports: [{ containerPort: 8100 }]
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/healthz', timeout=2)"
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: disruption-worker
+spec:
+  selector: { app: disruption-worker }
+  ports: [{ port: 80, targetPort: 8000 }]

@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: step4-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: step4-redis }
+  template:
+    metadata:
+      labels: { app: step4-redis }
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          args: ["--appendonly", "yes"]
+          ports: [{ containerPort: 6379 }]
+          readinessProbe:
+            exec: { command: ["redis-cli", "ping"] }
+            periodSeconds: 3
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: step4-redis-data }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: step4-redis-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests: { storage: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: step4-redis
+spec:
+  selector: { app: step4-redis }
+  ports: [{ port: 6379, targetPort: 6379 }]

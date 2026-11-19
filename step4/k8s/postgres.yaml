@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: step4-postgres
+type: Opaque
+stringData:
+  POSTGRES_DB: flights
+  POSTGRES_USER: flights
+  POSTGRES_PASSWORD: local-kind-only
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: step4-postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: step4-postgres }
+  template:
+    metadata:
+      labels: { app: step4-postgres }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          envFrom:
+            - secretRef: { name: step4-postgres }
+          ports: [{ containerPort: 5432 }]
+          readinessProbe:
+            exec: { command: ["sh", "-c", "pg_isready -U flights -d flights"] }
+            periodSeconds: 3
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: step4-postgres-data }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: step4-postgres-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests: { storage: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: step4-postgres
+spec:
+  selector: { app: step4-postgres }
+  ports: [{ port: 5432, targetPort: 5432 }]
