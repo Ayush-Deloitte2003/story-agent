@@ -1,0 +1,109 @@
+name: step4-live-llm-smoke
+
+on:
+  push:
+    paths:
+      - "step4/**"
+      - ".github/workflows/step4-live-llm.yml"
+    tags:
+      - "step4-live-llm-smoke-*"
+
+permissions:
+  contents: read
+
+jobs:
+  mock-tests:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+        working-directory: step4
+    env:
+      AGENT_MODE: mock
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Step 4 dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run deterministic tests with mock agents
+        run: python -m unittest discover -s tests -v
+
+  live-smoke:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/step4-live-llm-smoke-') && github.run_attempt == 1
+    needs: mock-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
+        working-directory: step4
+    env:
+      CLUSTER: flight-booking-live
+      DAPR_CLI_VERSION: 1.18.2
+      DAPR_RUNTIME_VERSION: 1.19.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Step 4 dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ${{ env.CLUSTER }}
+      - name: Install Dapr
+        run: |
+          wget -q https://raw.githubusercontent.com/dapr/cli/master/install/install.sh -O - | /bin/bash -s "$DAPR_CLI_VERSION"
+          dapr init -k --runtime-version "$DAPR_RUNTIME_VERSION" --wait --timeout 600
+          dapr status -k
+      - name: Build and load the Step 4 image
+        run: |
+          docker build -t flight-booking:dev .
+          kind load docker-image flight-booking:dev --name "$CLUSTER"
+      - name: Create the advisor-only Kubernetes secret
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          test -n "$OPENAI_API_KEY" || { echo "OPENAI_API_KEY secret is not configured"; exit 1; }
+          set -euo pipefail
+          printf '%s' "$OPENAI_API_KEY" |
+            kubectl create secret generic step4-llm \
+              --from-file=OPENAI_API_KEY=/dev/stdin \
+              --dry-run=client -o yaml |
+            kubectl apply -f -
+      - name: Deploy Dapr components and Step 4 services
+        run: |
+          kubectl apply -f k8s/redis.yaml -f k8s/postgres.yaml
+          kubectl rollout status deployment/step4-redis --timeout=180s
+          kubectl rollout status deployment/step4-postgres --timeout=180s
+          kubectl apply -f k8s/components.yaml -f k8s/apps.yaml
+          for d in flight-api booking-worker disruption-worker; do
+            kubectl rollout status "deployment/$d" --timeout=300s
+          done
+      - name: Enable one-request LLM agents
+        run: |
+          kubectl scale deployment/booking-worker --replicas=1
+          kubectl set env deployment/booking-worker -c booking-advisor \
+            AGENT_MODE=llm LLM_REQUEST_LIMIT=1 OPENAI_MODEL=gpt-4o-mini
+          kubectl set env deployment/booking-worker -c payment-advisor \
+            AGENT_MODE=llm LLM_REQUEST_LIMIT=1 OPENAI_MODEL=gpt-4o-mini
+          kubectl set env deployment/disruption-worker -c flight-advisor \
+            AGENT_MODE=llm LLM_REQUEST_LIMIT=1 OPENAI_MODEL=gpt-4o-mini
+          for d in booking-worker disruption-worker; do
+            kubectl rollout status "deployment/$d" --timeout=300s
+          done
+      - name: Verify live booking and disruption workflows
+        run: |
+          set -euo pipefail
+          kubectl port-forward svc/flight-api 8000:8000 >/tmp/step4-live-port-forward.log 2>&1 &
+          pf_pid=$!
+          trap 'kill "$pf_pid" 2>/dev/null || true' EXIT
+          for _ in {1..30}; do
+            curl --fail --silent http://127.0.0.1:8000/healthz >/dev/null && break
+            sleep 2
+          done
+          curl --fail --silent http://127.0.0.1:8000/healthz >/dev/null
+          python scripts/verify_live_llm.py

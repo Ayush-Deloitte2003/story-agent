@@ -5,6 +5,7 @@ from datetime import timedelta
 
 import dapr.ext.workflow as wf
 
+from app.agent_contracts import validate_disruption_advice
 from app.store import PostgresStore
 
 runtime = wf.WorkflowRuntime()
@@ -16,7 +17,8 @@ RETRY = wf.RetryPolicy(first_retry_interval=timedelta(seconds=1), max_number_of_
 def flight_rebooking_workflow(ctx: wf.DaprWorkflowContext, inp: dict):
     workflow_id = ctx.instance_id
     _status(ctx, "getting_rebooking_recommendation", booking_id=inp["booking_id"])
-    proposal = yield ctx.call_activity(recommend_rebooking, input=inp, retry_policy=RETRY)
+    proposal = yield ctx.call_activity(recommend_rebooking, input=inp)
+    proposal = validate_disruption_advice(proposal, inp["booking_id"], inp["flight_id"])
     if not proposal["alternatives"]:
         return {"status": "no_alternatives", "booking_id": inp["booking_id"]}
     expires_at = ctx.current_utc_datetime + timedelta(seconds=inp.get("approval_timeout_seconds", 600))
@@ -84,7 +86,10 @@ async def recommend_rebooking(ctx: wf.WorkflowActivityContext, inp: dict) -> dic
     with urllib.request.urlopen(request, timeout=5) as response:
         proposal = json.loads(response.read())
     return {"booking_id": inp["booking_id"], "flight_id": inp["flight_id"],
-            "alternatives": proposal["alternatives"]}
+            "alternatives": proposal["alternatives"],
+            "recommended_flight_id": proposal["recommended_flight_id"],
+            "rationale": proposal["rationale"],
+            "authority": proposal["authority"]}
 
 
 @runtime.activity(name="open_rebooking_approval")

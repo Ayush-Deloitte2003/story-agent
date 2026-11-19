@@ -6,6 +6,7 @@ import urllib.request
 
 import dapr.ext.workflow as wf
 
+from app.agent_contracts import validate_booking_advice, validate_payment_risk_advice
 from app.inventory import get_flight
 from app.store import PostgresStore
 
@@ -24,8 +25,8 @@ def flight_booking_workflow(ctx: wf.DaprWorkflowContext, inp: dict):
     advice = yield ctx.call_activity(
         booking_policy_advice,
         input={"flight_id": request["flight_id"], "seat": request["seat"]},
-        retry_policy=RETRY,
     )
+    advice = validate_booking_advice(advice, request["flight_id"], request["seat"])
     _status(ctx, "holding_seat", booking_id=booking_id)
     held = yield ctx.call_activity(
         hold_seat,
@@ -38,13 +39,21 @@ def flight_booking_workflow(ctx: wf.DaprWorkflowContext, inp: dict):
 
     expires_at = ctx.current_utc_datetime + timedelta(seconds=request["hold_seconds"])
     try:
+        _status(ctx, "assessing_payment_risk", booking_id=booking_id)
+        payment_advice = yield ctx.call_activity(
+            payment_risk_advice,
+            input={"flight_id": request["flight_id"], "seat": request["seat"],
+                   "amount_cents": get_flight(request["flight_id"])["price_cents"]},
+        )
+        payment_advice = validate_payment_risk_advice(payment_advice)
         yield ctx.call_activity(
             open_booking_approval,
             input={"workflow_id": workflow_id, "booking_id": booking_id, "request": request,
-                   "expires_at": expires_at.isoformat(), "advice": advice},
+                   "expires_at": expires_at.isoformat(), "advice": advice,
+                   "payment_advice": payment_advice},
             retry_policy=RETRY,
         )
-    except wf.TaskFailedError as exc:
+    except (wf.TaskFailedError, ValueError) as exc:
         yield ctx.call_activity(
             compensate_booking,
             input={"workflow_id": workflow_id, "booking_id": booking_id, "reason": "failed"},
@@ -122,6 +131,19 @@ async def booking_policy_advice(ctx: wf.WorkflowActivityContext, inp: dict) -> d
         return json.loads(response.read())
 
 
+@runtime.activity(name="payment_risk_advice")
+async def payment_risk_advice(ctx: wf.WorkflowActivityContext, inp: dict) -> dict:
+    url = os.getenv("PAYMENT_ADVISOR_URL", "http://127.0.0.1:8102/assess")
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(inp).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return json.loads(response.read())
+
+
 @runtime.activity(name="open_booking_approval")
 async def open_booking_approval(ctx: wf.WorkflowActivityContext, inp: dict) -> None:
     req = inp["request"]
@@ -129,7 +151,8 @@ async def open_booking_approval(ctx: wf.WorkflowActivityContext, inp: dict) -> N
     store.create_booking_approval(
         inp["workflow_id"], inp["booking_id"], inp["expires_at"],
         {"flight_id": req["flight_id"], "seat": req["seat"], "passenger_name": req["passenger_name"],
-         "price_cents": flight["price_cents"], "booking_advice": inp["advice"]},
+         "price_cents": flight["price_cents"], "booking_advice": inp["advice"],
+         "payment_risk_advice": inp["payment_advice"]},
     )
 
 

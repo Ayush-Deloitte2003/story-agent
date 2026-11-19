@@ -107,6 +107,16 @@ def inbox():
     return {"items": store.inbox()}
 
 
+@app.get("/inbox/{workflow_id}")
+def inbox_detail(workflow_id: str):
+    item = store.inbox_item(workflow_id)
+    if item is None:
+        raise HTTPException(404, "Approval not found")
+    worker = "booking-worker" if item["kind"] == "booking" else "disruption-worker"
+    workflow = _invoke(worker, f"internal/workflows/{workflow_id}", http_method="GET")
+    return {"item": item, "workflow": workflow}
+
+
 @app.post("/inbox/{workflow_id}/decision")
 def decide(workflow_id: str, request: DecisionRequest):
     item = store.inbox_item(workflow_id)

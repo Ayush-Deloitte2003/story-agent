@@ -1,4 +1,6 @@
+import os
 import unittest
+from unittest.mock import patch
 
 from app.contracts import BookingRequest, booking_payload
 from app.booking_advisor import advise_booking
@@ -24,14 +26,16 @@ class ContractTests(unittest.TestCase):
             BookingRequest(flight_id="SA101", seat="1A", passenger_name="Test", hold_seconds=3601)
 
     def test_booking_advisor_is_read_only_and_marks_advice_non_authoritative(self):
-        advice = advise_booking("SA101", "1A")
+        with patch.dict(os.environ, {"AGENT_MODE": "mock"}):
+            advice = advise_booking("SA101", "1A")
+            invalid_seat = advise_booking("SA101", "9Z")
         self.assertEqual(advice["authority"], "advisory_only")
         self.assertEqual(advice["recommendation"], "eligible_for_human_review")
         self.assertEqual([item["flight_id"] for item in advice["same_route_alternatives"]], ["SA102"])
         self.assertNotIn("hold", advice)
         self.assertNotIn("payment", advice)
         self.assertNotIn("ticket", advice)
-        self.assertEqual(advise_booking("SA101", "9Z")["recommendation"], "manual_review")
+        self.assertEqual(invalid_seat["recommendation"], "manual_review")
 
 
 if __name__ == "__main__":

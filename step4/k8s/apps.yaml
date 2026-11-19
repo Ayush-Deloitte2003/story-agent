@@ -59,6 +59,7 @@ spec:
           env:
             - { name: DATABASE_URL, value: "postgresql://flights:local-kind-only@step4-postgres:5432/flights" }
             - { name: BOOKING_ADVISOR_URL, value: "http://127.0.0.1:8101/advise" }
+            - { name: PAYMENT_ADVISOR_URL, value: "http://127.0.0.1:8102/assess" }
           ports: [{ containerPort: 8000 }]
           readinessProbe:
             httpGet: { path: /healthz, port: 8000 }
@@ -67,6 +68,15 @@ spec:
           image: flight-booking:dev
           imagePullPolicy: Never
           command: ["uvicorn", "app.booking_advisor:app", "--host", "127.0.0.1", "--port", "8101"]
+          env:
+            - { name: AGENT_MODE, value: "mock" }
+            - { name: OPENAI_MODEL, value: "gpt-4o-mini" }
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: step4-llm
+                  key: OPENAI_API_KEY
+                  optional: true
           ports: [{ containerPort: 8101 }]
           readinessProbe:
             exec:
@@ -74,6 +84,27 @@ spec:
                 - python
                 - -c
                 - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8101/healthz', timeout=2)"
+            periodSeconds: 5
+        - name: payment-advisor
+          image: flight-booking:dev
+          imagePullPolicy: Never
+          command: ["uvicorn", "app.payment_advisor:app", "--host", "127.0.0.1", "--port", "8102"]
+          env:
+            - { name: AGENT_MODE, value: "mock" }
+            - { name: OPENAI_MODEL, value: "gpt-4o-mini" }
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: step4-llm
+                  key: OPENAI_API_KEY
+                  optional: true
+          ports: [{ containerPort: 8102 }]
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8102/healthz', timeout=2)"
             periodSeconds: 5
 ---
 apiVersion: v1
@@ -116,6 +147,15 @@ spec:
           image: flight-booking:dev
           imagePullPolicy: Never
           command: ["uvicorn", "app.advisor:app", "--host", "127.0.0.1", "--port", "8100"]
+          env:
+            - { name: AGENT_MODE, value: "mock" }
+            - { name: OPENAI_MODEL, value: "gpt-4o-mini" }
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: step4-llm
+                  key: OPENAI_API_KEY
+                  optional: true
           ports: [{ containerPort: 8100 }]
           readinessProbe:
             exec:

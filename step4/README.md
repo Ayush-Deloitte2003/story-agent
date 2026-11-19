@@ -3,7 +3,9 @@
 This is a separate, simulated flight-booking example. It does not contact an
 airline or payment provider and never accepts card data. The seeded mock
 inventory is `SA101`, `SA102`, and `SA201`; payments are ledger records only.
-Model calls are not used.
+The three advisor roles can use bounded real LLM calls only in the explicit
+opt-in smoke workflow; all routine CI and Kubernetes deployments use mock
+advisors by default.
 
 ## Architecture
 
@@ -11,12 +13,13 @@ Model calls are not used.
   records human decisions, and publishes disruption CloudEvents.
 - The independently scalable `booking-worker` runs the durable seat-hold,
   approval, simulated payment, ticket, timeout, and compensation workflow. Its
-  literal `booking-advisor` sidecar returns mock catalog facts and same-route
-  alternatives; it cannot choose the booking, hold a seat, charge, or ticket.
+  literal `booking-advisor` sidecar provides read-only search/policy guidance,
+  and `payment-advisor` provides simulated payment-risk guidance. Neither can
+  choose the booking, hold a seat, charge, refund, or ticket.
 - `disruption-worker` consumes `flight-disruption` events and runs a separate
-  durable rebooking workflow. Its literal `flight-advisor` container is a
-  deterministic, read-only recommendation process; only the workflow can
-  reserve an alternative or update a ticket, and only after human approval.
+  durable rebooking workflow. Its literal `flight-advisor` container provides
+  read-only disruption/rebooking recommendations; only the workflow can reserve
+  an alternative or update a ticket, and only after human approval.
 - PostgreSQL stores domain records, holds, approvals, simulated payments, and
   tickets. Dapr Workflow uses its supported Redis state store; Redis Pub/Sub
   delivers disruption CloudEvents at least once.
@@ -26,12 +29,13 @@ flowchart LR
   Client --> API[Flight API]
   API -->|Dapr invoke| BW[Booking worker]
   BW --> BA[Read-only booking advisor sidecar]
+  BW --> PA[Payment-risk advisor sidecar]
   BW -->|durable workflow| PG[(PostgreSQL domain records)]
   BW -->|hold / payment / ticket activities| PG
   Client -->|human approval| API
   API -->|CloudEvent| PS[Dapr Pub/Sub]
   PS --> DW[Disruption worker]
-  DW --> AD[Read-only flight advisor sidecar]
+  DW --> AD[Disruption/rebooking advisor sidecar]
   DW -->|proposed alternatives| Inbox[Human inbox]
   Inbox -->|approval| DW
   DW -->|durable rebooking| PG
@@ -55,7 +59,8 @@ Retry with the same key and payload to get the same booking. Reusing the key
 with different input returns `409`. Query it at `GET /bookings/{booking_id}`.
 The booking workflow holds the selected mock seat until approval or expiry.
 
-`GET /inbox` lists pending human decisions. Approve or reject with
+`GET /inbox` lists pending human decisions; `GET /inbox/{workflow_id}` returns
+the current state of one approval, including completed rebookings. Approve or reject with
 `POST /inbox/{workflow_id}/decision` and `{"decision":"approve"}` or
 `{"decision":"reject"}`. For a disruption, approve with a proposed
 `flight_id`, e.g. `{"decision":"approve","flight_id":"SA102"}`. The API rejects
@@ -80,7 +85,7 @@ python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
 ```
 
-The manual GitHub Actions workflow `step4-kind` builds the image, deploys
+The GitHub Actions workflow `step4-kind` builds the image, deploys
 PostgreSQL, Redis, Dapr, and the three application deployments to Kind, then
 runs deterministic API checks. It covers duplicate idempotency keys, seat
 contention, approval, hold expiry, injected payment and ticketing failures,
@@ -89,6 +94,39 @@ disruption events, and human-approved rebooking. Failure injection is enabled
 only in this disposable Kind manifest and is disabled by default elsewhere.
 The Kubernetes Postgres password is a local-test placeholder; do not reuse it.
 
+## Optional live LLM smoke
+
+The three sidecars implement booking/search, payment-risk, and
+disruption/rebooking advisor roles. Their responses are bounded JSON and are
+validated again by the durable workflows against the mock catalog. They are
+advisory only: workflow code and human decisions retain all authority. The
+payment gateway remains simulated, and prompts contain no passenger or card
+data.
+
+The `mock-tests` job explicitly uses `AGENT_MODE=mock` and does not receive
+`OPENAI_API_KEY`. For the single reviewed live smoke, configure the repository
+Actions secret `OPENAI_API_KEY`, push the reviewed feature commit, then create
+and push a unique tag matching
+`step4-live-llm-smoke-*` on that commit. For example:
+
+```powershell
+git tag step4-live-llm-smoke-reviewed-run-1
+git push origin step4-live-llm-smoke-reviewed-run-1
+```
+
+The tag-triggered job creates a fresh Kind cluster, injects the secret only into
+the three advisor sidecars, runs one booking through booking/search and
+payment-risk approval, then one disruption through rebooking approval. The
+booking worker is scaled to one replica and each advisor sidecar has
+`LLM_REQUEST_LIMIT=1`; the three activities have no retry policy. This bounds
+the intended run to three provider requests total (below the hard maximum of
+five). The verifier checks the booking workflow's `awaiting_approval` stage,
+the pending rebooking proposal, human approval, and completed rebooking.
+Ordinary branch pushes run only mock tests, and rerunning a completed workflow
+attempt cannot repeat live calls. Provider output and secret material are not
+printed.
+Do not create or push the tag until the workflow and diff have been reviewed.
+
 No local Docker/Kind validation is claimed. The Actions workflow is the
-cluster-validation path. There is intentionally no payment gateway, airline
-integration, model provider, or performance/load test.
+cluster-validation path. There is intentionally no payment-provider or airline
+integration, no real booking/payment effect, and no performance/load test.

@@ -1,5 +1,8 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
+
+from fastapi import HTTPException
 
 from app import disruption_worker
 
@@ -22,6 +25,26 @@ class DisruptionWorkerLifespanTests(unittest.IsolatedAsyncioTestCase):
             async with disruption_worker.app.router.lifespan_context(disruption_worker.app):
                 start.assert_called_once()
             shutdown.assert_called_once()
+
+    async def test_workflow_state_endpoint_exposes_durable_rebooking_status(self):
+        state = SimpleNamespace(
+            runtime_status=SimpleNamespace(name="COMPLETED"),
+            serialized_custom_status='{"stage":"awaiting_rebooking_approval"}',
+            serialized_output='{"status":"rebooked"}',
+            failure_details=None,
+        )
+        client = SimpleNamespace(get_workflow_state=lambda *_args, **_kwargs: state)
+        with patch.object(disruption_worker, "client", client):
+            result = await disruption_worker.workflow_state("workflow-1")
+        self.assertEqual(result["runtime_status"], "COMPLETED")
+        self.assertEqual(result["output"], '{"status":"rebooked"}')
+
+    async def test_workflow_state_endpoint_returns_404_for_missing_state(self):
+        client = SimpleNamespace(get_workflow_state=lambda *_args, **_kwargs: None)
+        with patch.object(disruption_worker, "client", client):
+            with self.assertRaises(HTTPException) as raised:
+                await disruption_worker.workflow_state("missing")
+        self.assertEqual(raised.exception.status_code, 404)
 
 
 if __name__ == "__main__":

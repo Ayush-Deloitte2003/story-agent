@@ -168,7 +168,8 @@ each step; their own READMEs explain the code.
 
 `step4\` is an isolated Dapr flight-booking MVP with durable booking and
 disruption/rebooking workflows, a human approval inbox, PostgreSQL domain
-records, mock inventory and payment, compensation, and bounded deterministic
-advisor sidecars. It makes no real bookings or payments and uses no model
-provider. See [`step4/README.md`](step4/README.md) for API examples and the
-manual `step4-kind` GitHub Actions validation workflow.
+records, mock inventory and payment, compensation, and booking/search,
+payment-risk, and disruption advisor roles. Routine runs use deterministic
+mock agents; a separate one-time tag-triggered smoke can make at most three real
+LLM requests and has no real booking or payment effects. See
+[`step4/README.md`](step4/README.md) for API examples and validation instructions.

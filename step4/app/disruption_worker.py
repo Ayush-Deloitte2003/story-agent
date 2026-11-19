@@ -4,7 +4,7 @@ import json
 from contextlib import asynccontextmanager
 
 import dapr.ext.workflow as wf
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from app.disruption_workflow import flight_rebooking_workflow, runtime
 
@@ -26,6 +26,20 @@ app = FastAPI(title="Flight disruption workflow worker", lifespan=lifespan)
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
+
+
+@app.get("/internal/workflows/{workflow_id}")
+async def workflow_state(workflow_id: str):
+    state = await asyncio.to_thread(client.get_workflow_state, workflow_id, fetch_payloads=True)
+    if state is None:
+        raise HTTPException(404, "Workflow not found")
+    return {
+        "workflow_id": workflow_id,
+        "runtime_status": state.runtime_status.name,
+        "custom_status": state.serialized_custom_status,
+        "output": state.serialized_output,
+        "failure": getattr(state.failure_details, "message", None),
+    }
 
 
 @app.get("/dapr/subscribe")
