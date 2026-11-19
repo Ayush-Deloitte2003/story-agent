@@ -11,7 +11,10 @@ from contextlib import asynccontextmanager
 from fastapi import Body, FastAPI, Header, HTTPException
 
 from app import dispatcher, feed_poller
-from app.contracts import BookingRequest, DecisionRequest, booking_payload
+from app.contracts import (
+    CANCELLATION_ONLY_FIELDS, BookingRequest, CancellationRequest, DecisionRequest, booking_payload,
+    cancellation_payload,
+)
 from app.events import Accepted, classify
 from app.store import PostgresStore
 
@@ -145,9 +148,32 @@ def get_booking(booking_id: str):
     return {"booking": booking, "workflow": workflow}
 
 
+@app.post("/cancellations", status_code=202)
+def create_cancellation(
+    request: CancellationRequest,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1, max_length=200),
+):
+    try:
+        payload = cancellation_payload(request, FAILURE_INJECTION_ENABLED)
+        workflow_id = "cancellation-" + hashlib.sha256(idempotency_key.encode()).hexdigest()[:40]
+        row, _created = store.create_cancellation(workflow_id, idempotency_key, payload)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    # The cancellation and its dispatch record are committed; delivery failures are retried by the reconciler.
+    _try_dispatch(workflow_id)
+    return {"cancellation_id": workflow_id, "workflow_id": workflow_id,
+            "booking_id": row["booking_id"], "status": row["status"]}
+
+
 @app.get("/inbox")
 def inbox():
     return {"items": store.inbox()}
+
+
+def _worker_for(kind: str) -> str:
+    return {"booking": "booking-worker", "cancellation": "cancellation-worker"}.get(kind, "disruption-worker")
 
 
 @app.get("/inbox/{workflow_id}")
@@ -155,7 +181,7 @@ def inbox_detail(workflow_id: str):
     item = store.inbox_item(workflow_id)
     if item is None:
         raise HTTPException(404, "Approval not found")
-    worker = "booking-worker" if item["kind"] == "booking" else "disruption-worker"
+    worker = _worker_for(item["kind"])
     workflow = _invoke(worker, f"internal/workflows/{workflow_id}", http_method="GET")
     return {"item": item, "workflow": workflow}
 
@@ -166,15 +192,30 @@ def decide(workflow_id: str, request: DecisionRequest):
     if item is None:
         raise HTTPException(404, "Approval not found")
     decision = request.model_dump(exclude_none=True)
-    if request.decision == "approve" and item["kind"] == "rebooking":
-        alternatives = {option["flight_id"] for option in item["proposal"]["alternatives"]}
-        if request.flight_id not in alternatives:
-            raise HTTPException(422, "Choose one of the proposed alternative flights")
-    elif request.flight_id is not None:
-        raise HTTPException(422, "flight_id is only valid for rebooking approvals")
+    if item["kind"] == "cancellation":
+        if request.flight_id is not None:
+            raise HTTPException(422, "flight_id is only valid for rebooking approvals")
+        if request.decision == "approve":
+            if request.request_hash is None or request.refund_cents is None:
+                raise HTTPException(422, "Approving a cancellation requires request_hash and refund_cents")
+            if (request.request_hash != item["proposal"]["request_hash"]
+                    or request.refund_cents != item["proposal"]["refund_cents"]):
+                raise HTTPException(409, "Approval does not match this cancellation request and refund amount")
+        else:
+            for field in CANCELLATION_ONLY_FIELDS:
+                decision.pop(field, None)
+    else:
+        for field in CANCELLATION_ONLY_FIELDS:
+            decision.pop(field, None)
+        if request.decision == "approve" and item["kind"] == "rebooking":
+            alternatives = {option["flight_id"] for option in item["proposal"]["alternatives"]}
+            if request.flight_id not in alternatives:
+                raise HTTPException(422, "Choose one of the proposed alternative flights")
+        elif request.flight_id is not None:
+            raise HTTPException(422, "flight_id is only valid for rebooking approvals")
     if not store.decide(workflow_id, decision):
         raise HTTPException(409, "Approval already has a different decision")
-    worker = "booking-worker" if item["kind"] == "booking" else "disruption-worker"
+    worker = _worker_for(item["kind"])
     _invoke(worker, "internal/approval/raise", {"workflow_id": workflow_id, "decision": decision})
     return {"workflow_id": workflow_id, "status": "decision_recorded"}
 

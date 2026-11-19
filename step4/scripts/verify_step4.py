@@ -123,6 +123,83 @@ def verify_ambient_feed(confirmed):
     print("[PASS] Poller turned a feed row into a rebooking workflow; approval still required")
 
 
+def confirmed_booking(key, flight, seat):
+    pending = submit(key, flight, seat)
+    await_inbox(pending["workflow_id"])
+    approve(pending["workflow_id"])
+    await_status(pending["booking_id"], "confirmed")
+    return pending
+
+
+def cancel(key, booking_id, approval_seconds=300, expected=(202,)):
+    return request("POST", "/cancellations", {"booking_id": booking_id, "approval_seconds": approval_seconds},
+                   {"Idempotency-Key": key}, expected=expected)
+
+
+def inbox_item(workflow_id, status=None):
+    def load():
+        if status in (None, "pending"):
+            return next((item for item in request("GET", "/inbox")[1]["items"]
+                         if item["workflow_id"] == workflow_id), None)
+        return request("GET", f"/inbox/{workflow_id}")[1]["item"]
+    return eventually(load, lambda item: item is not None and (status is None or item["status"] == status),
+                      f"inbox {workflow_id} status {status}", 60)
+
+
+def decide_cancellation(item, decision="approve", **overrides):
+    body = {"decision": decision}
+    if decision == "approve":
+        body.update(request_hash=item["proposal"]["request_hash"], refund_cents=item["proposal"]["refund_cents"])
+    body.update(overrides)
+    return request("POST", f"/inbox/{item['workflow_id']}/decision", body, expected=(200, 409, 422))
+
+
+def verify_cancellations():
+    stamp = int(time.time())
+    first = confirmed_booking(f"cancel-seed-a-{stamp}", "SA201", "1A")
+    second = confirmed_booking(f"cancel-seed-b-{stamp}", "SA201", "1B")
+
+    # Approval path: a simulated refund at the deterministic 100% tier, then the seat is released.
+    key = f"cancel-a-{stamp}"
+    accepted = cancel(key, first["booking_id"])[1]
+    assert accepted["status"] == "scheduled" and accepted["workflow_id"].startswith("cancellation-"), accepted
+    duplicate = cancel(key, first["booking_id"])[1]
+    assert duplicate["workflow_id"] == accepted["workflow_id"], (accepted, duplicate)
+    status, _ = request("POST", "/cancellations", {"booking_id": second["booking_id"]},
+                        {"Idempotency-Key": key}, expected=(409,))
+    assert status == 409, "Idempotency key reuse with a different booking was accepted"
+    item = inbox_item(accepted["workflow_id"], "pending")
+    assert item["kind"] == "cancellation" and item["proposal"]["refund_cents"] == 14500, item
+    assert booking(first["booking_id"])["booking"]["status"] == "confirmed", "Booking changed before approval"
+    status, _ = decide_cancellation(item, request_hash=None)
+    assert status == 422, "Approval without request_hash was accepted"
+    status, _ = decide_cancellation(item, refund_cents=1)
+    assert status == 409, "Approval for a different refund amount was accepted"
+    time.sleep(1)
+    assert booking(first["booking_id"])["booking"]["status"] == "confirmed", "Booking changed without valid approval"
+    assert decide_cancellation(item)[0] == 200
+    await_status(first["booking_id"], "cancelled")
+    assert inbox_item(accepted["workflow_id"], "completed")["status"] == "completed"
+    # A repeated request after completion is refused, and the released seat can be booked again.
+    cancel(f"cancel-a-again-{stamp}", first["booking_id"], expected=(409,))
+    rebooked = submit(f"cancel-seat-reuse-{stamp}", "SA201", "1A")
+    await_status(rebooked["booking_id"], "awaiting_approval")
+    print("[PASS] Cancellation approved: simulated refund recorded, booking cancelled, seat released")
+
+    # Rejection and expiry leave the booking confirmed and allow a new request.
+    rejected = cancel(f"cancel-b-reject-{stamp}", second["booking_id"])[1]
+    decide_cancellation(inbox_item(rejected["workflow_id"], "pending"), "reject")
+    inbox_item(rejected["workflow_id"], "rejected")
+    assert booking(second["booking_id"])["booking"]["status"] == "confirmed"
+    expiring = cancel(f"cancel-b-expire-{stamp}", second["booking_id"], approval_seconds=4)[1]
+    inbox_item(expiring["workflow_id"], "expired")
+    assert booking(second["booking_id"])["booking"]["status"] == "confirmed"
+    final = cancel(f"cancel-b-final-{stamp}", second["booking_id"])[1]
+    assert decide_cancellation(inbox_item(final["workflow_id"], "pending"))[0] == 200
+    await_status(second["booking_id"], "cancelled")
+    print("[PASS] Cancellation rejection and expiry keep the booking; a new request can then complete")
+
+
 def main():
     request("GET", "/healthz")
     print("[PASS] API and PostgreSQL are ready")
@@ -216,6 +293,7 @@ def main():
     assert result["booking"]["payment"]["status"] == "paid"
     print("[PASS] Duplicate disruption is deduplicated; human-approved rebooking preserves original payment")
 
+    verify_cancellations()
     verify_ambient_feed(winner)
     print("ALL STEP 4 CHECKS PASSED")
 

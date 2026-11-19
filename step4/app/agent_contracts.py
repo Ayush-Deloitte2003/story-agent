@@ -91,3 +91,25 @@ def validate_disruption_advice(result: dict, booking_id: str, flight_id: str) ->
     if not isinstance(rationale, str) or not rationale.strip() or len(rationale) > 180:
         raise ValueError("Disruption advisor rationale must be 1-180 characters")
     return result
+
+
+def validate_cancellation_advice(result: dict, fare: dict) -> dict:
+    """The advisor may only restate the deterministic fare result; any deviation is rejected."""
+    keys = {"eligibility", "proposed_refund_cents", "fare_rule", "rationale", "authority"}
+    if not isinstance(result, dict) or set(result) != keys:
+        raise ValueError("Cancellation advisor result has an invalid shape")
+    if result["authority"] != ADVISORY_AUTHORITY:
+        raise ValueError("Cancellation advisor must remain advisory")
+    proposed = result["proposed_refund_cents"]
+    if isinstance(proposed, bool) or not isinstance(proposed, int):
+        raise ValueError("Cancellation advisor refund must be an integer")
+    if result["eligibility"] != fare["eligibility"]:
+        raise ValueError("Cancellation advisor eligibility differs from the fare rule")
+    if result["fare_rule"] != fare["fare_rule"]:
+        raise ValueError("Cancellation advisor applied a different fare rule")
+    if proposed != fare["refund_cents"]:
+        raise ValueError("Cancellation advisor refund differs from the fare rule")
+    rationale = result["rationale"]
+    if not isinstance(rationale, str) or not rationale.strip() or len(rationale) > 180:
+        raise ValueError("Cancellation advisor rationale must be 1-180 characters")
+    return result

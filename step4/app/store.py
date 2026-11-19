@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import timezone
 
 import psycopg
 from psycopg.rows import dict_row
@@ -82,6 +83,22 @@ class PostgresStore:
                     partial_seq BIGINT, partial_booking_id TEXT,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 );
+                CREATE TABLE IF NOT EXISTS cancellations (
+                    workflow_id TEXT PRIMARY KEY, booking_id TEXT NOT NULL REFERENCES bookings(booking_id),
+                    idempotency_key TEXT NOT NULL UNIQUE, request JSONB NOT NULL, snapshot JSONB NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'scheduled', refund_cents INTEGER, fare_rule TEXT,
+                    request_hash TEXT, advice_note TEXT,
+                    requested_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS one_active_cancellation ON cancellations(booking_id)
+                    WHERE status IN ('scheduled', 'awaiting_approval');
+                CREATE TABLE IF NOT EXISTS refunds (
+                    cancellation_id TEXT PRIMARY KEY REFERENCES cancellations(workflow_id),
+                    booking_id TEXT NOT NULL REFERENCES bookings(booking_id),
+                    refund_id TEXT NOT NULL UNIQUE, amount_cents INTEGER NOT NULL, status TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS one_issued_refund ON refunds(booking_id)
+                    WHERE status = 'issued';
             """
             for statement in ddl.split(";"):
                 if statement.strip():
@@ -455,12 +472,18 @@ class PostgresStore:
                 return {"booking_id": booking_id, "status": "confirmed", "ticket": ticket}
             booking = conn.execute(
                 """SELECT b.status FROM bookings b
-                   JOIN seat_holds h ON h.booking_id = b.booking_id WHERE b.booking_id = %s""",
+                   JOIN seat_holds h ON h.booking_id = b.booking_id WHERE b.booking_id = %s
+                   FOR UPDATE OF b""",
                 (booking_id,),
             ).fetchone()
             flight = conn.execute("SELECT seats FROM flight_inventory WHERE flight_id = %s", (flight_id,)).fetchone()
             if not booking or booking["status"] != "confirmed":
                 raise RuntimeError("Only confirmed bookings can be rebooked")
+            if conn.execute(
+                "SELECT 1 FROM cancellations WHERE booking_id = %s AND status IN ('scheduled', 'awaiting_approval')",
+                (booking_id,),
+            ).fetchone():
+                raise RuntimeError("A cancellation is in progress for this booking")
             if not flight:
                 raise RuntimeError("Recommended flight or seat is not in mock inventory")
             seats = self._json_value(flight["seats"])
@@ -498,4 +521,191 @@ class PostgresStore:
                 """UPDATE approval_inbox SET status = %s WHERE workflow_id = %s
                    AND status IN ('pending', 'approved')""",
                 (status, workflow_id),
+            )
+
+    # ---- cancellations and simulated refunds -------------------------------------------------
+
+    def create_cancellation(self, workflow_id: str, idempotency_key: str, request: dict) -> tuple[dict, bool]:
+        """Durably accept a cancellation with its dispatch intent.
+
+        Raises LookupError for an unknown booking and ValueError for conflicts. The fare inputs are
+        snapshotted here so a later catalog change cannot alter the computed refund.
+        """
+        from app.events import CANCELLATION_REQUESTED, REGISTRY
+        with self._connect() as conn:
+            booking = conn.execute(
+                "SELECT status FROM bookings WHERE booking_id = %s FOR UPDATE", (request["booking_id"],)
+            ).fetchone()
+            if booking is None:
+                raise LookupError("Booking not found")
+            existing = conn.execute(
+                "SELECT * FROM cancellations WHERE idempotency_key = %s", (idempotency_key,)
+            ).fetchone()
+            if existing:
+                if self._json_value(existing["request"]) != request:
+                    raise ValueError("Idempotency key was already used for a different cancellation")
+                return existing, False
+            if booking["status"] != "confirmed":
+                raise ValueError(f"Booking is {booking['status']}; only confirmed bookings can be cancelled")
+            if conn.execute(
+                "SELECT 1 FROM cancellations WHERE booking_id = %s AND status IN ('scheduled', 'awaiting_approval')",
+                (request["booking_id"],),
+            ).fetchone():
+                raise ValueError("A cancellation is already in progress for this booking")
+            ticket = conn.execute(
+                """SELECT t.flight_id, t.seat, f.depart_at FROM tickets t
+                   JOIN flight_inventory f ON f.flight_id = t.flight_id WHERE t.booking_id = %s""",
+                (request["booking_id"],),
+            ).fetchone()
+            payment = conn.execute(
+                "SELECT amount_cents FROM simulated_payments WHERE booking_id = %s AND status = 'paid'",
+                (request["booking_id"],),
+            ).fetchone()
+            if ticket is None or payment is None:
+                raise ValueError("Booking has no paid ticket to cancel")
+            requested_at = conn.execute("SELECT now() AS t").fetchone()["t"].astimezone(timezone.utc)
+            snapshot = {"flight_id": ticket["flight_id"], "seat": ticket["seat"],
+                        "paid_cents": payment["amount_cents"], "depart_at": ticket["depart_at"],
+                        "requested_at": requested_at.isoformat()}
+            row = conn.execute(
+                """INSERT INTO cancellations(workflow_id, booking_id, idempotency_key, request, snapshot, requested_at)
+                   VALUES (%s, %s, %s, %s, %s, %s) RETURNING *""",
+                (workflow_id, request["booking_id"], idempotency_key, json.dumps(request),
+                 json.dumps(snapshot), requested_at),
+            ).fetchone()
+            spec = REGISTRY[CANCELLATION_REQUESTED]
+            self._insert_dispatch(conn, workflow_id, spec.name, spec.app_id, spec.method, {
+                "workflow_id": workflow_id, "booking_id": request["booking_id"],
+                "request": request, "snapshot": snapshot,
+            })
+            return row, True
+
+    def cancellation(self, workflow_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM cancellations WHERE workflow_id = %s", (workflow_id,)).fetchone()
+            if row:
+                row["request"] = self._json_value(row["request"])
+                row["snapshot"] = self._json_value(row["snapshot"])
+            return row
+
+    def refund(self, cancellation_id: str) -> dict | None:
+        with self._connect() as conn:
+            return conn.execute("SELECT * FROM refunds WHERE cancellation_id = %s", (cancellation_id,)).fetchone()
+
+    @staticmethod
+    def _cancellation_state(conn, booking_id: str, snapshot: dict) -> str | None:
+        """Lock the booking and report why a cancellation can no longer apply (None when it can)."""
+        booking = conn.execute(
+            "SELECT status FROM bookings WHERE booking_id = %s FOR UPDATE", (booking_id,)
+        ).fetchone()
+        if booking is None or booking["status"] != "confirmed":
+            return "not_confirmed"
+        ticket = conn.execute(
+            "SELECT flight_id, seat FROM tickets WHERE booking_id = %s", (booking_id,)
+        ).fetchone()
+        if ticket is None or (ticket["flight_id"], ticket["seat"]) != (snapshot["flight_id"], snapshot["seat"]):
+            return "stale"
+        return None
+
+    def open_cancellation_approval(self, workflow_id: str, booking_id: str, snapshot: dict,
+                                   expires_at, proposal: dict) -> dict:
+        with self._connect() as conn:
+            problem = self._cancellation_state(conn, booking_id, snapshot)
+            if problem:
+                conn.execute(
+                    "UPDATE cancellations SET status = %s WHERE workflow_id = %s AND status = 'scheduled'",
+                    (problem, workflow_id),
+                )
+                return {"opened": False, "status": problem}
+            conn.execute(
+                """INSERT INTO approval_inbox(workflow_id, kind, booking_id, status, expires_at, proposal)
+                   VALUES (%s, 'cancellation', %s, 'pending', %s, %s)
+                   ON CONFLICT (workflow_id) DO NOTHING""",
+                (workflow_id, booking_id, expires_at, json.dumps(proposal)),
+            )
+            conn.execute(
+                """UPDATE cancellations SET status = 'awaiting_approval', refund_cents = %s, fare_rule = %s,
+                   request_hash = %s, advice_note = %s
+                   WHERE workflow_id = %s AND status IN ('scheduled', 'awaiting_approval')""",
+                (proposal["refund_cents"], proposal["fare_rule"], proposal["request_hash"],
+                 proposal.get("advice_note"), workflow_id),
+            )
+            return {"opened": True, "status": "awaiting_approval"}
+
+    def issue_refund(self, workflow_id: str, booking_id: str, snapshot: dict, refund_cents: int,
+                     failure_at: str | None) -> dict:
+        """Idempotently record a simulated refund of the snapshot-derived amount."""
+        if failure_at == "refund":
+            raise RuntimeError("Injected simulated refund failure")
+        with self._connect() as conn:
+            problem = self._cancellation_state(conn, booking_id, snapshot)
+            existing = conn.execute("SELECT * FROM refunds WHERE cancellation_id = %s", (workflow_id,)).fetchone()
+            if existing:
+                return {"result": existing["status"], "refund_id": existing["refund_id"],
+                        "amount_cents": existing["amount_cents"]}
+            if problem:
+                return {"result": problem}
+            row = conn.execute(
+                """INSERT INTO refunds(cancellation_id, booking_id, refund_id, amount_cents, status)
+                   VALUES (%s, %s, %s, %s, 'issued') ON CONFLICT (cancellation_id) DO NOTHING RETURNING *""",
+                (workflow_id, booking_id, f"refund-{workflow_id}", refund_cents),
+            ).fetchone()
+            if refund_cents > 0:
+                conn.execute(
+                    "UPDATE simulated_payments SET status = 'refunded' WHERE booking_id = %s AND status = 'paid'",
+                    (booking_id,),
+                )
+            return {"result": "issued", "refund_id": row["refund_id"], "amount_cents": row["amount_cents"]}
+
+    def release_cancelled_seat(self, workflow_id: str, booking_id: str, failure_at: str | None) -> dict:
+        if failure_at == "release":
+            raise RuntimeError("Injected simulated seat-release failure")
+        with self._connect() as conn:
+            booking = conn.execute(
+                "SELECT status FROM bookings WHERE booking_id = %s FOR UPDATE", (booking_id,)
+            ).fetchone()
+            cancellation = conn.execute(
+                "SELECT status FROM cancellations WHERE workflow_id = %s", (workflow_id,)
+            ).fetchone()
+            if booking and booking["status"] == "cancelled" and cancellation["status"] == "completed":
+                return {"booking_id": booking_id, "status": "cancelled", "already_released": True}
+            refund = conn.execute(
+                "SELECT status FROM refunds WHERE cancellation_id = %s", (workflow_id,)
+            ).fetchone()
+            if not refund or refund["status"] != "issued":
+                raise RuntimeError("Seat release requires an issued simulated refund")
+            if not booking or booking["status"] != "confirmed":
+                raise RuntimeError("Only confirmed bookings can be released")
+            conn.execute("DELETE FROM seat_holds WHERE booking_id = %s", (booking_id,))
+            conn.execute("UPDATE bookings SET status = 'cancelled' WHERE booking_id = %s", (booking_id,))
+            conn.execute("UPDATE cancellations SET status = 'completed' WHERE workflow_id = %s", (workflow_id,))
+            conn.execute("UPDATE approval_inbox SET status = 'completed' WHERE workflow_id = %s", (workflow_id,))
+            return {"booking_id": booking_id, "status": "cancelled", "already_released": False}
+
+    def reverse_refund(self, workflow_id: str, booking_id: str) -> dict:
+        """Compensation when seat release fails after a refund was recorded."""
+        with self._connect() as conn:
+            conn.execute("SELECT 1 FROM bookings WHERE booking_id = %s FOR UPDATE", (booking_id,))
+            reversed_row = conn.execute(
+                """UPDATE refunds SET status = 'reversed' WHERE cancellation_id = %s AND status = 'issued'
+                   RETURNING amount_cents""", (workflow_id,),
+            ).fetchone()
+            if reversed_row and reversed_row["amount_cents"] > 0:
+                conn.execute(
+                    "UPDATE simulated_payments SET status = 'paid' WHERE booking_id = %s AND status = 'refunded'",
+                    (booking_id,),
+                )
+        self.close_cancellation(workflow_id, "failed")
+        return {"booking_id": booking_id, "status": "refund_reversed"}
+
+    def close_cancellation(self, workflow_id: str, status: str) -> None:
+        inbox_status = status if status in ("expired", "rejected") else "failed"
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE cancellations SET status = %s WHERE workflow_id = %s AND status IN ('scheduled', 'awaiting_approval')",
+                (status, workflow_id),
+            )
+            conn.execute(
+                "UPDATE approval_inbox SET status = %s WHERE workflow_id = %s AND status IN ('pending', 'approved')",
+                (inbox_status, workflow_id),
             )

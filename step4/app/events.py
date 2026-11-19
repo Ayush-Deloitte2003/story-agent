@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 BOOKING_REQUESTED = "com.example.booking.requested"
 FLIGHT_DISRUPTED = "com.example.flight.disrupted"
+CANCELLATION_REQUESTED = "com.example.cancellation.requested"
 
 
 class DisruptionData(BaseModel):
@@ -19,6 +20,13 @@ class BookingDispatchData(BaseModel):
     workflow_id: str = Field(min_length=1, max_length=100)
     booking_id: str = Field(min_length=1, max_length=100)
     request: dict
+
+
+class CancellationDispatchData(BaseModel):
+    workflow_id: str = Field(min_length=1, max_length=100)
+    booking_id: str = Field(min_length=1, max_length=100)
+    request: dict
+    snapshot: dict
 
 
 @dataclass(frozen=True)
@@ -43,6 +51,10 @@ REGISTRY: dict[str, EventType] = {
     BOOKING_REQUESTED: EventType(
         BOOKING_REQUESTED, BookingDispatchData, "booking-worker",
         "internal/bookings/schedule", lambda _s, _e, data: data["workflow_id"], external=False,
+    ),
+    CANCELLATION_REQUESTED: EventType(
+        CANCELLATION_REQUESTED, CancellationDispatchData, "cancellation-worker",
+        "internal/cancellations/schedule", lambda _s, _e, data: data["workflow_id"], external=False,
     ),
 }
 

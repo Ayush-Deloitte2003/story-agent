@@ -3,14 +3,14 @@
 This is a separate, simulated flight-booking example. It does not contact an
 airline or payment provider and never accepts card data. The seeded mock
 inventory is `SA101`, `SA102`, and `SA201`; payments are ledger records only.
-The three advisor roles can use bounded real LLM calls only in the explicit
+The four advisor roles can use bounded real LLM calls only in the explicit
 opt-in smoke workflow; all routine CI and Kubernetes deployments use mock
 advisors by default.
 
 ## Architecture
 
-- `flight-api` accepts idempotent booking requests, lists the approval inbox,
-  records human decisions, and publishes disruption CloudEvents.
+- `flight-api` accepts idempotent booking and cancellation requests, lists the
+  approval inbox, records human decisions, and publishes disruption CloudEvents.
 - The independently scalable `booking-worker` runs the durable seat-hold,
   approval, simulated payment, ticket, timeout, and compensation workflow. Its
   literal `booking-advisor` sidecar provides read-only search/policy guidance,
@@ -20,6 +20,10 @@ advisors by default.
   durable rebooking workflow. Its literal `flight-advisor` container provides
   read-only disruption/rebooking recommendations; only the workflow can reserve
   an alternative or update a ticket, and only after human approval.
+- `cancellation-worker` (a third, separate Deployment) runs the durable
+  `flight_cancellation_workflow`. Its literal `cancellation-advisor` sidecar (the
+  fourth advisor) proposes a refund eligibility, amount and fare rule. It has no
+  authority to refund, cancel or approve.
 - PostgreSQL stores domain records, holds, approvals, simulated payments, and
   tickets. Dapr Workflow uses its supported Redis state store. Event receipts,
   quarantined events and dispatch records are also in PostgreSQL.
@@ -52,6 +56,14 @@ flowchart LR
     DW <-->|localhost call / validated JSON advice| DA
   end
 
+  subgraph CANCEL_POD["cancellation-worker pod"]
+    CW[Cancellation workflow<br/>fare rules, human approval, simulated refund and seat release]
+    CW_DAPR[Dapr sidecar]
+    CA[Cancellation policy advisor container]
+    CW <-->|Dapr workflow calls / app callbacks| CW_DAPR
+    CW <-->|localhost call / validated JSON advice| CA
+  end
+
   Client -->|booking request, inbox, decision| API
   API -->|booking and approval records| PG[(PostgreSQL domain records<br/>simulated payments and tickets)]
   API_DAPR -->|leased reconciler: schedule booking by stable ID| BW_DAPR
@@ -67,6 +79,10 @@ flowchart LR
   DW_DAPR -->|durable workflow checkpoints| State
 
   State --> Redis[(Redis)]
+  API_DAPR -->|leased reconciler: schedule cancellation by stable ID| CW_DAPR
+  API_DAPR -->|raise cancellation decision| CW_DAPR
+  CW -->|snapshot, refund and release records| PG
+  CW_DAPR -->|durable workflow checkpoints| State
 
   subgraph LIVE_LLM["Opt-in tagged live smoke only"]
     LLM[OpenAI API]
@@ -191,6 +207,55 @@ Limitations: a booking ticketed after a flight's status change is not
 re-evaluated; a long-open transaction elsewhere in the database delays feed
 reads until it ends; counters are per process.
 
+## Cancellations and simulated refunds
+
+`POST /cancellations` with an `Idempotency-Key` header and
+`{"booking_id":"booking-…"}` uses the same durable path as bookings: the
+cancellation row and a dispatch record commit together, the API returns `202`
+with `cancellation_id`, `workflow_id`, `booking_id` and `status: scheduled`, and
+the leased reconciler schedules `flight_cancellation_workflow` by stable ID
+(`cancellation-…`) on `cancellation-worker`. The same key and payload return the
+same cancellation, a changed payload returns `409`, an unknown booking `404`, and
+a booking that is not `confirmed` (including already cancelled) or already has an
+active cancellation `409`. Status is visible through `GET /inbox`,
+`GET /inbox/{id}` and `GET /bookings/{id}`.
+
+- **Deterministic authority.** The refund comes only from fare rules in the mock
+  catalog, applied to values snapshotted when the request was accepted
+  (`requested_at`, the amount paid, the departure time): 100% at 72h or more
+  before departure, 50% from 24h up to 72h, 0% under 24h. A later price or
+  schedule change cannot alter the amount; recomputing is used only to detect a
+  stale ticket (a different flight or seat than the snapshot).
+- **Advisor.** The cancellation advisor's JSON (eligibility, proposed refund,
+  fare rule, rationale) is validated against the deterministic result. Any
+  mismatch or advisor failure falls back to the deterministic amount and records
+  `advice_note` on the cancellation and proposal.
+- **Human approval bound to the request.** Approving needs `request_hash` and
+  `refund_cents` from the proposal; without them the API returns `422`, and a
+  mismatch returns `409` (the workflow also re-checks and ends `stale`). Rejection
+  needs neither. Booking and rebooking approvals are unchanged and ignore these
+  fields.
+- **Effects.** After approval the simulated refund (one issued refund per
+  booking, keyed by cancellation) and seat release are idempotent and retried.
+  The booking becomes `cancelled`; the ticket row is retained.
+- **Failure handling.** If the refund step fails, the cancellation ends
+  `refund_failed` and the booking stays confirmed. If seat release fails after the
+  refund, the refund is reversed and it ends `failed`. Rejection ends `rejected`
+  and expiry `expired`, with the booking confirmed.
+- **One active cancellation.** Only `scheduled` and `awaiting_approval` count as
+  active. After any terminal status (`rejected`, `expired`, `stale`,
+  `not_confirmed`, `refund_failed`, `failed`) a new request with a new
+  idempotency key is allowed while the booking is confirmed, so a booking is never
+  blocked forever.
+- **Races.** Cancellation and rebooking serialize on the booking row. If the
+  cancellation finishes first, a rebooking fails with "only confirmed bookings".
+  If a rebooking finishes first, the cancellation ends `stale`. A rebooking is
+  refused while a cancellation is active.
+
+Guarantee: at-least-once delivery with idempotent effects, not exactly-once.
+Limitations: the ticket is retained after cancellation (booking status is
+authoritative); refunds are simulated ledger records only.
+
 ## Run and verify
 
 From the repository root, enter `step4\`, then use Python 3.12+:
@@ -201,19 +266,23 @@ python -m unittest discover -s tests -v
 ```
 
 The GitHub Actions workflow `step4-kind` builds the image, deploys
-PostgreSQL, Redis, Dapr, and the three application deployments to Kind, then
+PostgreSQL, Redis, Dapr, and the application deployments (API plus booking,
+disruption and cancellation workers) to Kind, then
 runs deterministic API checks. It covers duplicate idempotency keys, seat
 contention, approval, hold expiry, injected payment and ticketing failures,
 compensation/refund, workflow recovery after a worker pod replacement, duplicate
-disruption events, the opt-in operations-feed poller (seeded cancelled-flight row,
+disruption events, cancellation approval, rejection, expiry and duplicate
+requests (mock advisor), the opt-in operations-feed poller (seeded cancelled-flight row,
 bad-row quarantine, approval still required), and human-approved rebooking. Failure injection is enabled
 only in this disposable Kind manifest and is disabled by default elsewhere.
 The Kubernetes Postgres password is a local-test placeholder; do not reuse it.
 
 ## Optional live LLM smoke
 
-The three sidecars implement booking/search, payment-risk, and
-disruption/rebooking advisor roles. Their responses are bounded JSON and are
+The four sidecars implement booking/search, payment-risk,
+disruption/rebooking and cancellation-policy advisor roles. The tagged live
+smoke below exercises only the original three; the cancellation advisor is
+validated with mock advisors only. Their responses are bounded JSON and are
 validated again by the durable workflows against the mock catalog. They are
 advisory only: workflow code and human decisions retain all authority. The
 payment gateway remains simulated, and prompts contain no passenger or card
