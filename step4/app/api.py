@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from contextlib import asynccontextmanager
@@ -32,11 +33,20 @@ def _invoke(app_id: str, method: str, body: dict | None = None, http_method: str
         headers={"Content-Type": "application/json"},
         method=http_method,
     )
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            return json.loads(response.read() or b"{}")
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise HTTPException(503, f"Workflow service {app_id} is unavailable") from exc
+    for attempt in range(6):
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return json.loads(response.read() or b"{}")
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (502, 503, 504) or attempt == 5:
+                raise HTTPException(503, f"Workflow service {app_id} is unavailable") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt == 5:
+                raise HTTPException(503, f"Workflow service {app_id} is unavailable") from exc
+        except json.JSONDecodeError as exc:
+            raise HTTPException(502, f"Workflow service {app_id} returned invalid JSON") from exc
+        time.sleep(min(0.5 * (2 ** attempt), 2))
+    raise HTTPException(503, f"Workflow service {app_id} is unavailable")
 
 
 def _publish_disruption(event: dict) -> None:
