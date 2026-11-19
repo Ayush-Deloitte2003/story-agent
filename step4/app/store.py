@@ -68,6 +68,20 @@ class PostgresStore:
                 ALTER TABLE dispatch_records ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ;
                 UPDATE dispatch_records SET scheduled_at = dispatched_at
                     WHERE status = 'dispatched' AND scheduled_at IS NULL;
+                CREATE TABLE IF NOT EXISTS ops_feed_events (
+                    seq BIGSERIAL PRIMARY KEY, txid xid8 NOT NULL DEFAULT pg_current_xact_id(),
+                    source_event_id TEXT NOT NULL UNIQUE, payload JSONB NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+                CREATE TABLE IF NOT EXISTS ops_flight_status (
+                    flight_id TEXT PRIMARY KEY, status TEXT NOT NULL, disruptive BOOLEAN NOT NULL,
+                    last_seq BIGINT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS poller_cursors (
+                    name TEXT PRIMARY KEY, last_seq BIGINT NOT NULL DEFAULT 0,
+                    partial_seq BIGINT, partial_booking_id TEXT,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
             """
             for statement in ddl.split(";"):
                 if statement.strip():
@@ -122,28 +136,31 @@ class PostgresStore:
         (source, id) was already received with a different payload.
         """
         with self._connect() as conn:
-            row = conn.execute(
-                """INSERT INTO event_receipts(source, event_id, event_type, payload_hash, payload, workflow_id)
-                   VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (source, event_id) DO NOTHING
-                   RETURNING workflow_id""",
-                (accepted.source, accepted.event_id, accepted.event_type.name, accepted.payload_hash,
-                 json.dumps(accepted.data), accepted.workflow_id),
-            ).fetchone()
-            if row:
-                self._insert_dispatch(
-                    conn, accepted.workflow_id, accepted.event_type.name, accepted.event_type.app_id,
-                    accepted.event_type.method, {**accepted.data, "event_id": accepted.event_id,
-                                                 "source": accepted.source,
-                                                 "workflow_id": accepted.workflow_id},
-                )
-                return accepted.workflow_id, True
-            existing = conn.execute(
-                "SELECT payload_hash, workflow_id FROM event_receipts WHERE source = %s AND event_id = %s",
-                (accepted.source, accepted.event_id),
-            ).fetchone()
-            if existing["payload_hash"] != accepted.payload_hash:
-                raise ValueError("Event id was already received with a different payload")
-            return existing["workflow_id"], False
+            return self._accept_event(conn, accepted)
+
+    def _accept_event(self, conn, accepted) -> tuple[str, bool]:
+        row = conn.execute(
+            """INSERT INTO event_receipts(source, event_id, event_type, payload_hash, payload, workflow_id)
+               VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (source, event_id) DO NOTHING
+               RETURNING workflow_id""",
+            (accepted.source, accepted.event_id, accepted.event_type.name, accepted.payload_hash,
+             json.dumps(accepted.data), accepted.workflow_id),
+        ).fetchone()
+        if row:
+            self._insert_dispatch(
+                conn, accepted.workflow_id, accepted.event_type.name, accepted.event_type.app_id,
+                accepted.event_type.method, {**accepted.data, "event_id": accepted.event_id,
+                                             "source": accepted.source,
+                                             "workflow_id": accepted.workflow_id},
+            )
+            return accepted.workflow_id, True
+        existing = conn.execute(
+            "SELECT payload_hash, workflow_id FROM event_receipts WHERE source = %s AND event_id = %s",
+            (accepted.source, accepted.event_id),
+        ).fetchone()
+        if existing["payload_hash"] != accepted.payload_hash:
+            raise ValueError("Event id was already received with a different payload")
+        return existing["workflow_id"], False
 
     def receipt(self, source: str, event_id: str) -> dict | None:
         with self._connect() as conn:
@@ -154,12 +171,39 @@ class PostgresStore:
 
     def quarantine_event(self, quarantined, raw) -> None:
         with self._connect() as conn:
-            conn.execute(
-                """INSERT INTO quarantined_events(quarantine_id, reason, event_type, source, event_id, raw)
-                   VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (quarantine_id) DO NOTHING""",
-                (quarantined.quarantine_id, quarantined.reason, quarantined.event_type,
-                 quarantined.source, quarantined.event_id, json.dumps(raw, default=str)),
-            )
+            self._quarantine_event(conn, quarantined, raw)
+
+    @staticmethod
+    def _quarantine_event(conn, quarantined, raw) -> None:
+        conn.execute(
+            """INSERT INTO quarantined_events(quarantine_id, reason, event_type, source, event_id, raw)
+               VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (quarantine_id) DO NOTHING""",
+            (quarantined.quarantine_id, quarantined.reason, quarantined.event_type,
+             quarantined.source, quarantined.event_id, json.dumps(raw, default=str)),
+        )
+
+    def insert_feed_event(self, source_event_id: str, payload: dict) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                """INSERT INTO ops_feed_events(source_event_id, payload) VALUES (%s, %s)
+                   ON CONFLICT (source_event_id) DO NOTHING RETURNING seq""",
+                (source_event_id, json.dumps(payload)),
+            ).fetchone()
+            return row is not None
+
+    def ensure_cursor(self, name: str, start_at_tail: bool = False) -> None:
+        with self._connect() as conn:
+            start = 0
+            if start_at_tail:
+                start = conn.execute("SELECT COALESCE(max(seq), 0) AS m FROM ops_feed_events").fetchone()["m"]
+            conn.execute("INSERT INTO poller_cursors(name, last_seq) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                         (name, start))
+
+    def cursor(self, name: str) -> dict | None:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT last_seq, partial_seq, partial_booking_id FROM poller_cursors WHERE name = %s",
+                (name,)).fetchone()
 
     def lease_dispatches(self, owner: str, limit: int = 10, lease_seconds: int = 30,
                          dispatch_id: str | None = None) -> list[dict]:

@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Body, FastAPI, Header, HTTPException
 
-from app import dispatcher
+from app import dispatcher, feed_poller
 from app.contracts import BookingRequest, DecisionRequest, booking_payload
 from app.events import Accepted, classify
 from app.store import PostgresStore
@@ -30,14 +30,38 @@ async def reconcile_forever() -> None:
         await asyncio.sleep(DISPATCH_INTERVAL_SECONDS)
 
 
+async def poll_feed_forever() -> None:
+    interval = float(os.getenv("OPS_FEED_POLL_INTERVAL_SECONDS", "5"))
+    batch_size = int(os.getenv("OPS_FEED_BATCH_SIZE", "20"))
+    max_events = int(os.getenv("OPS_FEED_MAX_EVENTS_PER_PASS", "200"))
+    await asyncio.to_thread(store.ensure_cursor, feed_poller.CURSOR_NAME)
+    while True:
+        try:
+            await asyncio.to_thread(feed_poller.poll_pass, store, batch_size, max_events)
+        except Exception:
+            pass  # already counted and logged by poll_pass
+        await asyncio.sleep(interval)
+
+
+def feed_polling_enabled() -> bool:
+    return os.getenv("OPS_FEED_POLL_ENABLED", "false").lower() == "true"
+
+
+def feed_simulation_enabled() -> bool:
+    return os.getenv("OPS_FEED_SIMULATION", "false").lower() == "true"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await asyncio.to_thread(store.initialize)
     reconciler = asyncio.create_task(reconcile_forever())
+    poller = asyncio.create_task(poll_feed_forever()) if feed_polling_enabled() else None
     try:
         yield
     finally:
         reconciler.cancel()
+        if poller:
+            poller.cancel()
 
 
 app = FastAPI(title="Flight booking API (simulated)", lifespan=lifespan)
@@ -155,6 +179,26 @@ def decide(workflow_id: str, request: DecisionRequest):
     return {"workflow_id": workflow_id, "status": "decision_recorded"}
 
 
+
+
+@app.post("/simulation/ops-feed", status_code=202)
+def seed_feed_event(raw: dict = Body(...)):
+    """Insert a simulated operations-feed row; disabled unless OPS_FEED_SIMULATION=true."""
+    if not feed_simulation_enabled():
+        raise HTTPException(404, "Not found")
+    source_event_id = raw.get("source_event_id")
+    if (not isinstance(source_event_id, str) or not source_event_id.strip()
+            or len(source_event_id) > feed_poller.MAX_SOURCE_EVENT_ID):
+        raise HTTPException(422, "source_event_id must be a non-empty string up to 128 characters")
+    payload = {key: value for key, value in raw.items() if key != "source_event_id"}
+    created = store.insert_feed_event(source_event_id, payload)
+    return {"source_event_id": source_event_id, "status": "seeded" if created else "duplicate"}
+
+
+@app.get("/ops-feed/status")
+def feed_status():
+    return {"enabled": feed_polling_enabled(), "cursor": store.cursor(feed_poller.CURSOR_NAME),
+            "counters": feed_poller.counters.totals}
 
 
 @app.post("/disruptions", status_code=202)

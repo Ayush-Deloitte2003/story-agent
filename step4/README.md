@@ -60,6 +60,7 @@ flowchart LR
   BW_DAPR -->|durable workflow checkpoints| State[Dapr Workflow state store]
 
   API -->|event receipts, quarantine, dispatch records| PG
+  Feed[(Simulated ops feed + poller cursor<br/>opt-in, PostgreSQL)] -->|bounded poller in API: changed disruptions only| API
   API_DAPR -->|leased reconciler: schedule rebooking by stable ID| DW_DAPR
   API_DAPR -->|raise rebooking decision| DW_DAPR
   DW -->|proposal and approved rebooking| PG
@@ -138,7 +139,57 @@ return `202` `quarantined` and are stored in `quarantined_events` with the
 reason instead of being dropped. Workflow IDs derive from source and event ID,
 so re-delivery never starts another rebooking workflow. Events carry no
 passenger or payment data. Approvals, simulated payments and flights are
-unchanged; there is no poller or dashboard.
+unchanged; there is no dashboard or quarantine replay.
+
+### Simulated operations feed and poller
+
+Disruptions can also arrive without a manual call. A bounded, opt-in poller
+(`app/feed_poller.py`) reads a simulated PostgreSQL feed table
+(`ops_feed_events`: stable `source_event_id`, JSON payload) and creates
+disruption events. It never connects to an airline or any external service, and
+it only creates events: workflows, human approval, simulated payments and
+simulated flights stay authoritative, and no event can approve a rebooking.
+
+- **Off by default.** `OPS_FEED_POLL_ENABLED=true` starts it as a task in the
+  existing API process (no new service). Tunables: `OPS_FEED_POLL_INTERVAL_SECONDS`
+  (5), `OPS_FEED_BATCH_SIZE` (20 feed rows per pass),
+  `OPS_FEED_MAX_EVENTS_PER_PASS` (200 disruption events per pass),
+  `OPS_FEED_DELAY_THRESHOLD_MINUTES` (60). The checked-in manifests do not set
+  any of these; the `step4-kind` workflow enables them with `kubectl set env`.
+- **Seeding.** `POST /simulation/ops-feed` with
+  `{"source_event_id":"s1","flight_id":"SA101","status":"cancelled"}` inserts a
+  row (`on_time`, `delayed` with `delay_minutes`, or `cancelled`). It returns 404
+  unless `OPS_FEED_SIMULATION=true` and is idempotent on `source_event_id`.
+- **What counts as a change.** A row emits only when it is disruptive
+  (`cancelled`, or `delayed` with `delay_minutes` at or above the threshold) and
+  its `(status, disruptive)` differs from the flight's stored status. Repeats are
+  suppressed, including a different delay inside `delayed`. Moving to `on_time` or
+  a minor delay updates the stored status without emitting, so a later disruption
+  is a new event.
+- **Routing.** One event per confirmed booking ticketed on the flight (id
+  `<source_event_id>:<booking_id>`, source `ops-feed-simulator`) goes through the
+  same registry, `event_receipts` and `dispatch_records` path as
+  `POST /disruptions`, so workflow IDs and the leased reconciler are unchanged.
+- **Cursor.** `poller_cursors` stores the last fully processed feed `seq`. One
+  transaction per pass locks the cursor row (`FOR UPDATE SKIP LOCKED`, so other
+  replicas skip that tick) and writes receipts, dispatch records, quarantines,
+  flight status and the cursor together. A crash before commit replays the pass;
+  re-emitting an event hits the existing receipt key and creates no second
+  workflow. Rows are read only below the snapshot's `xmin`, so a lower `seq` that
+  commits late is not skipped (requires PostgreSQL 13+; the manifests and CI use
+  16). If one row fans out past the per-pass cap, the cursor records a partial
+  position (`partial_seq`, `partial_booking_id`) and the flight status is stored
+  only when the whole row is done.
+- **Bad rows.** Malformed rows, unknown statuses and unknown flights are written
+  to `quarantined_events` in the same transaction and the cursor moves past them.
+- **Observability.** One log line per pass with a poll ID and counts only, plus
+  in-process counters at `GET /ops-feed/status` (cursor and counters, no
+  payloads).
+
+Guarantee: at-least-once delivery with idempotent effects, not exactly-once.
+Limitations: a booking ticketed after a flight's status change is not
+re-evaluated; a long-open transaction elsewhere in the database delays feed
+reads until it ends; counters are per process.
 
 ## Run and verify
 
@@ -154,7 +205,8 @@ PostgreSQL, Redis, Dapr, and the three application deployments to Kind, then
 runs deterministic API checks. It covers duplicate idempotency keys, seat
 contention, approval, hold expiry, injected payment and ticketing failures,
 compensation/refund, workflow recovery after a worker pod replacement, duplicate
-disruption events, and human-approved rebooking. Failure injection is enabled
+disruption events, the opt-in operations-feed poller (seeded cancelled-flight row,
+bad-row quarantine, approval still required), and human-approved rebooking. Failure injection is enabled
 only in this disposable Kind manifest and is disabled by default elsewhere.
 The Kubernetes Postgres password is a local-test placeholder; do not reuse it.
 

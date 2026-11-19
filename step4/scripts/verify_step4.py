@@ -94,6 +94,35 @@ def verify_restart_recovery():
     print("[PASS] Workflow resumed after booking-worker pod replacement")
 
 
+def verify_ambient_feed(confirmed):
+    """A seeded feed row must start a rebooking via the poller, still gated by human approval."""
+    booking_id = confirmed["booking_id"]
+    before = booking(booking_id)["booking"]
+    flight = before["ticket"]["flight_id"]
+    feed_id = f"verify-feed-{int(time.time())}"
+    row = {"source_event_id": feed_id, "flight_id": flight, "status": "cancelled"}
+    assert request("POST", "/simulation/ops-feed", row)[1]["status"] == "seeded"
+    assert request("POST", "/simulation/ops-feed", row)[1]["status"] == "duplicate"
+    bad_id = feed_id + "-bad"
+    request("POST", "/simulation/ops-feed", {"source_event_id": bad_id, "flight_id": flight, "status": "exploded"})
+
+    def pending():
+        return [item for item in request("GET", "/inbox")[1]["items"]
+                if item["booking_id"] == booking_id and item["kind"] == "rebooking"]
+
+    items = eventually(pending, bool, f"poller-started rebooking for {booking_id}", timeout=60)
+    status = eventually(lambda: request("GET", "/ops-feed/status")[1],
+                        lambda value: value["counters"]["quarantined"] >= 1, "bad feed row quarantined")
+    assert status["counters"]["emitted"] >= 1, status
+    time.sleep(3)
+    assert len(pending()) == 1, "Repeated polls created extra rebooking approvals"
+    unchanged = booking(booking_id)["booking"]
+    assert unchanged["status"] == "confirmed" and unchanged["ticket"]["flight_id"] == flight, \
+        "Booking changed without human approval"
+    assert items[0]["status"] == "pending"
+    print("[PASS] Poller turned a feed row into a rebooking workflow; approval still required")
+
+
 def main():
     request("GET", "/healthz")
     print("[PASS] API and PostgreSQL are ready")
@@ -186,6 +215,8 @@ def main():
     )
     assert result["booking"]["payment"]["status"] == "paid"
     print("[PASS] Duplicate disruption is deduplicated; human-approved rebooking preserves original payment")
+
+    verify_ambient_feed(winner)
     print("ALL STEP 4 CHECKS PASSED")
 
 

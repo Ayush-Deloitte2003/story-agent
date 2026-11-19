@@ -64,6 +64,8 @@ jobs:
           kubectl rollout status deployment/step4-redis --timeout=180s
           kubectl rollout status deployment/step4-postgres --timeout=180s
           kubectl apply -f k8s/components.yaml -f k8s/apps.yaml
+          # Demo-only flags are applied by this mock workflow, never by the checked-in manifests.
+          kubectl set env deployment/flight-api OPS_FEED_POLL_ENABLED=true OPS_FEED_SIMULATION=true OPS_FEED_POLL_INTERVAL_SECONDS=1
           for d in flight-api booking-worker disruption-worker; do kubectl rollout status "deployment/$d" --timeout=300s; done
           kubectl get pods
       - name: Verify APIs, failures, recovery, and rebooking
