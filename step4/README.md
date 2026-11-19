@@ -26,21 +26,54 @@ advisors by default.
 
 ```mermaid
 flowchart LR
-  Client --> API[Flight API]
-  API -->|Dapr invoke| BW[Booking worker]
-  BW --> BA[Read-only booking advisor sidecar]
-  BW --> PA[Payment-risk advisor sidecar]
-  BW -->|durable workflow| PG[(PostgreSQL domain records)]
-  BW -->|hold / payment / ticket activities| PG
-  Client -->|human approval| API
-  API -->|CloudEvent| PS[Dapr Pub/Sub]
-  PS --> DW[Disruption worker]
-  DW --> AD[Disruption/rebooking advisor sidecar]
-  DW -->|proposed alternatives| Inbox[Human inbox]
-  Inbox -->|approval| DW
-  DW -->|durable rebooking| PG
-  BW -. durable workflow state .-> Redis[(Dapr state store)]
-  DW -. durable workflow state .-> Redis
+  Client[Client / human reviewer]
+
+  subgraph API_POD["flight-api pod"]
+    API[Flight API]
+    API_DAPR[Dapr sidecar]
+    API <-->|Dapr calls / app callbacks| API_DAPR
+  end
+
+  subgraph BOOKING_POD["booking-worker pod(s)"]
+    BW[Booking workflow host<br/>hold, human approval, simulated payment/ticket]
+    BW_DAPR[Dapr sidecar]
+    BA[Booking/search advisor container]
+    PA[Payment-risk advisor container]
+    BW <-->|Dapr workflow calls / app callbacks| BW_DAPR
+    BW <-->|localhost call / validated JSON advice| BA
+    BW <-->|localhost call / validated JSON advice| PA
+  end
+
+  subgraph DISRUPTION_POD["disruption-worker pod"]
+    DW[Disruption/rebooking workflow<br/>human approval before rebooking]
+    DW_DAPR[Dapr sidecar]
+    DA[Disruption/rebooking advisor container]
+    DW <-->|Dapr workflow calls / app callbacks| DW_DAPR
+    DW <-->|localhost call / validated JSON advice| DA
+  end
+
+  Client -->|booking request, inbox, decision| API
+  API -->|booking and approval records| PG[(PostgreSQL domain records<br/>simulated payments and tickets)]
+  API_DAPR -->|schedule booking / raise booking decision| BW_DAPR
+  BW -->|holds, simulated charge, ticket| PG
+  BW_DAPR -->|durable workflow checkpoints| State[Dapr Workflow state store]
+
+  API_DAPR -->|publish disruption CloudEvent| PS[Dapr Pub/Sub]
+  PS -->|at-least-once delivery| DW_DAPR
+  API_DAPR -->|raise rebooking decision| DW_DAPR
+  DW -->|proposal and approved rebooking| PG
+  DW_DAPR -->|durable workflow checkpoints| State
+
+  State --> Redis[(Redis)]
+  PS -. Redis-backed .-> Redis
+
+  subgraph LIVE_LLM["Opt-in tagged live smoke only"]
+    LLM[OpenAI API]
+    Limit["AGENT_MODE=llm<br/>mock by default<br/>max 1 request per advisor; no LLM retries<br/>secret only in advisor containers"]
+  end
+  BA -.->|live mode only| LLM
+  PA -.->|live mode only| LLM
+  DA -.->|live mode only| LLM
 ```
 
 ## API contracts
