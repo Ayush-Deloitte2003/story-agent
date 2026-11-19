@@ -66,14 +66,20 @@ jobs:
           kubectl apply -f k8s/components.yaml -f k8s/apps.yaml
           # Demo-only flags are applied by this mock workflow, never by the checked-in manifests.
           kubectl set env deployment/flight-api OPS_FEED_POLL_ENABLED=true OPS_FEED_SIMULATION=true OPS_FEED_POLL_INTERVAL_SECONDS=1
-          for d in flight-api booking-worker disruption-worker cancellation-worker; do kubectl rollout status "deployment/$d" --timeout=300s; done
+          for d in flight-api booking-worker disruption-worker cancellation-worker support-service; do kubectl rollout status "deployment/$d" --timeout=300s; done
           kubectl get pods
       - name: Verify APIs, failures, recovery, and rebooking
         run: |
           set -euo pipefail
           kubectl port-forward svc/flight-api 8000:8000 >/tmp/step4-port-forward.log 2>&1 &
           pf_pid=$!
-          trap 'kill "$pf_pid" 2>/dev/null || true' EXIT
+          kubectl port-forward svc/support-service 8001:8000 >/tmp/step4-support-port-forward.log 2>&1 &
+          support_pf_pid=$!
+          trap 'kill "$pf_pid" "$support_pf_pid" 2>/dev/null || true' EXIT
+          for _ in {1..30}; do
+            curl --fail --silent http://127.0.0.1:8001/healthz >/dev/null && break
+            sleep 2
+          done
           for _ in {1..30}; do
             curl --fail --silent http://127.0.0.1:8000/healthz >/dev/null && break
             sleep 2
@@ -87,3 +93,4 @@ jobs:
           kubectl logs deployment/booking-worker --all-containers --tail=150 || true
           kubectl logs deployment/disruption-worker --all-containers --tail=150 || true
           kubectl logs deployment/cancellation-worker --all-containers --tail=150 || true
+          kubectl logs deployment/support-service --all-containers --tail=150 || true

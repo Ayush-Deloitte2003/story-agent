@@ -125,7 +125,7 @@ class LiveLLMVerifierTests(unittest.TestCase):
 
     def test_llm_workflow_activities_have_no_retry_policy(self):
         targets = (
-            (flight_booking_workflow, {"booking_policy_advice", "payment_risk_advice"}),
+            (flight_booking_workflow, {"booking_policy_advice", "payment_risk_advice", "fare_itinerary_advice"}),
             (flight_rebooking_workflow, {"recommend_rebooking"}),
         )
         for workflow, llm_activities in targets:

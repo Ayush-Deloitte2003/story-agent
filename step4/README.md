@@ -3,7 +3,7 @@
 This is a separate, simulated flight-booking example. It does not contact an
 airline or payment provider and never accepts card data. The seeded mock
 inventory is `SA101`, `SA102`, and `SA201`; payments are ledger records only.
-The four advisor roles can use bounded real LLM calls only in the explicit
+The six advisor roles can use bounded real LLM calls only in the explicit
 opt-in smoke workflow; all routine CI and Kubernetes deployments use mock
 advisors by default.
 
@@ -24,7 +24,15 @@ advisors by default.
   `flight_cancellation_workflow`. Its literal `cancellation-advisor` sidecar (the
   fourth advisor) proposes a refund eligibility, amount and fare rule. It has no
   authority to refund, cancel or approve.
-- PostgreSQL stores domain records, holds, approvals, simulated payments, and
+- `booking-worker` also hosts the fifth advisor, `fare-advisor`, which compares the
+  requested flight and same-route alternatives (fare, bag fee, layover,
+  connection risk). Its output is checked against the mock catalog and is shown
+  only in the approval proposal; it never selects, holds or changes a flight.
+- `support-service` (a separate, read-only Deployment with the sixth advisor,
+  `support-advisor`, as a sidecar) drafts answers to booking questions via
+  `POST /support/ask`. It is deliberately outside `flight-api` and Dapr, so a slow
+  or failing model call cannot affect booking requests. See
+  [Support questions](#support-questions-and-fare-comparison).- PostgreSQL stores domain records, holds, approvals, simulated payments, and
   tickets. Dapr Workflow uses its supported Redis state store. Event receipts,
   quarantined events and dispatch records are also in PostgreSQL.
 
@@ -43,10 +51,20 @@ flowchart LR
     BW_DAPR[Dapr sidecar]
     BA[Booking/search advisor container]
     PA[Payment-risk advisor container]
+    FA[Fare/itinerary advisor container]
     BW <-->|Dapr workflow calls / app callbacks| BW_DAPR
     BW <-->|localhost call / validated JSON advice| BA
     BW <-->|localhost call / validated JSON advice| PA
+    BW <-->|localhost call / validated JSON advice| FA
   end
+
+  subgraph SUPPORT_POD["support-service pod (read-only, no Dapr)"]
+    SS[Support service<br/>passenger-free facts, no writes]
+    SA[Support advisor container]
+    SS <-->|localhost call / validated JSON draft, fallback on failure| SA
+  end
+  Client -->|POST /support/ask| SS
+  SS -->|read-only facts| PG
 
   subgraph DISRUPTION_POD["disruption-worker pod"]
     DW[Disruption/rebooking workflow<br/>human approval before rebooking]
@@ -256,6 +274,38 @@ Guarantee: at-least-once delivery with idempotent effects, not exactly-once.
 Limitations: the ticket is retained after cancellation (booking status is
 authoritative); refunds are simulated ledger records only.
 
+## Support questions and fare comparison
+
+**Fare comparison.** Before the seat hold, the booking workflow asks `fare-advisor`
+for a comparison of the requested flight and same-route alternatives from extra
+mock catalog data (fare class, baggage allowance and fee, arrival time, layover,
+connection risk). The comparison must equal the catalog exactly; the ranking may
+only reorder the listed flights. The result is stored as `fare_advice` in the
+approval proposal for the human reviewer. The booked flight always comes from the
+original request, never from the advice. The call is not retried; if the advisor
+is unavailable or its output is invalid, the workflow uses a deterministic
+catalog comparison and records `fare_advice_note`. Booking workflow instances
+started before this version was deployed are not covered; the Kind checks start
+and finish every workflow within one deployment.
+
+**Support questions.** `POST /support/ask` on `support-service` takes
+`{"booking_id": ..., "question": ...}` and returns `answer_draft`,
+`suggested_action` (`none`, `request_cancellation` or `contact_agent`),
+`requires_human_approval`, `source` (`advisor` or `fallback`) and
+`authority: advisory_only`. It reads only booking status, route, paid amount and
+cancellation/refund status (no passenger name, request payload or payment ids),
+and it writes nothing. A suggested cancellation is only a suggestion: the customer
+still has to call `POST /cancellations`, and a human approval is still required.
+The advisor is called once with a 5-second timeout and no retry. Any failure or
+invalid or disallowed output produces a deterministic fallback answer. Questions
+and answers are not stored and are not logged; logs contain only a request id,
+the booking id, the source and the suggested action, and `GET /support/status`
+exposes per-process counters. Question scrubbing (emails and long digit runs) is
+best effort only: it does not anonymize free text, and in `AGENT_MODE=llm` the
+scrubbed question would be sent to the model provider. Both new advisors are mock
+by default, honour `LLM_REQUEST_LIMIT` like the others, and are not covered by the
+tagged live smoke.
+
 ## Run and verify
 
 From the repository root, enter `step4\`, then use Python 3.12+:
@@ -267,9 +317,10 @@ python -m unittest discover -s tests -v
 
 The GitHub Actions workflow `step4-kind` builds the image, deploys
 PostgreSQL, Redis, Dapr, and the application deployments (API plus booking,
-disruption and cancellation workers) to Kind, then
+disruption and cancellation workers, plus the read-only support service) to Kind, then
 runs deterministic API checks. It covers duplicate idempotency keys, seat
-contention, approval, hold expiry, injected payment and ticketing failures,
+contention, approval, fare advice in the approval proposal, a read-only support
+answer, hold expiry, injected payment and ticketing failures,
 compensation/refund, workflow recovery after a worker pod replacement, duplicate
 disruption events, cancellation approval, rejection, expiry and duplicate
 requests (mock advisor), the opt-in operations-feed poller (seeded cancelled-flight row,
@@ -279,9 +330,10 @@ The Kubernetes Postgres password is a local-test placeholder; do not reuse it.
 
 ## Optional live LLM smoke
 
-The four sidecars implement booking/search, payment-risk,
-disruption/rebooking and cancellation-policy advisor roles. The tagged live
-smoke below exercises only the original three; the cancellation advisor is
+The six sidecars implement booking/search, payment-risk,
+disruption/rebooking, cancellation-policy, fare/itinerary and support advisor
+roles. The tagged live
+smoke below exercises only the original three; the other three are
 validated with mock advisors only. Their responses are bounded JSON and are
 validated again by the durable workflows against the mock catalog. They are
 advisory only: workflow code and human decisions retain all authority. The

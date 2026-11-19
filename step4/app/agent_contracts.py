@@ -1,6 +1,6 @@
 """Strict workflow-side validation for untrusted agent sidecar output."""
 
-from app.inventory import get_flight, recommend_alternatives
+from app.inventory import compare_options, get_flight, recommend_alternatives
 
 ADVISORY_AUTHORITY = "advisory_only"
 
@@ -90,6 +90,42 @@ def validate_disruption_advice(result: dict, booking_id: str, flight_id: str) ->
     rationale = result["rationale"]
     if not isinstance(rationale, str) or not rationale.strip() or len(rationale) > 180:
         raise ValueError("Disruption advisor rationale must be 1-180 characters")
+    return result
+
+
+def validate_fare_advice(result: dict, flight_id: str) -> dict:
+    """Comparison data must equal the mock catalog; the ranking may only reorder known flights."""
+    expected = compare_options(flight_id)
+    keys = {"comparison", "ranked_flight_ids", "summary", "authority"}
+    if not isinstance(result, dict) or set(result) != keys:
+        raise ValueError("Fare advisor result has an invalid shape")
+    if result["authority"] != ADVISORY_AUTHORITY:
+        raise ValueError("Fare advisor must remain advisory")
+    if result["comparison"] != expected:
+        raise ValueError("Fare advisor changed the catalog comparison")
+    ranked = result["ranked_flight_ids"]
+    if (not isinstance(ranked, list) or any(not isinstance(item, str) for item in ranked)
+            or sorted(ranked) != sorted(option["flight_id"] for option in expected)):
+        raise ValueError("Fare advisor ranking must list each known option exactly once")
+    summary = result["summary"]
+    if not isinstance(summary, str) or not summary.strip() or len(summary) > 240:
+        raise ValueError("Fare advisor summary must be 1-240 characters")
+    return result
+
+
+SUPPORT_ACTIONS = ("none", "request_cancellation", "contact_agent")
+
+
+def validate_support_advice(result: dict, allowed_actions: list[str]) -> dict:
+    if not isinstance(result, dict) or set(result) != {"answer", "suggested_action", "authority"}:
+        raise ValueError("Support advisor result has an invalid shape")
+    if result["authority"] != ADVISORY_AUTHORITY:
+        raise ValueError("Support advisor must remain advisory")
+    if result["suggested_action"] not in SUPPORT_ACTIONS or result["suggested_action"] not in allowed_actions:
+        raise ValueError("Support advisor suggested an action that is not allowed")
+    answer = result["answer"]
+    if not isinstance(answer, str) or not answer.strip() or len(answer) > 600:
+        raise ValueError("Support advisor answer must be 1-600 characters")
     return result
 
 

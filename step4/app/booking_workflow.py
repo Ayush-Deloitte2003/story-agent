@@ -6,8 +6,8 @@ import urllib.request
 
 import dapr.ext.workflow as wf
 
-from app.agent_contracts import validate_booking_advice, validate_payment_risk_advice
-from app.inventory import get_flight
+from app.agent_contracts import validate_booking_advice, validate_fare_advice, validate_payment_risk_advice
+from app.inventory import deterministic_fare_advice, get_flight
 from app.store import PostgresStore
 
 log = logging.getLogger("step4.booking-workflow")
@@ -27,6 +27,16 @@ def flight_booking_workflow(ctx: wf.DaprWorkflowContext, inp: dict):
         input={"flight_id": request["flight_id"], "seat": request["seat"]},
     )
     advice = validate_booking_advice(advice, request["flight_id"], request["seat"])
+    # Advisory only: this comparison goes into the approval proposal and never changes the booking.
+    fare_note = None
+    try:
+        fare_advice = yield ctx.call_activity(fare_itinerary_advice, input={"flight_id": request["flight_id"]})
+        fare_advice = validate_fare_advice(fare_advice, request["flight_id"])
+    except wf.TaskFailedError:
+        fare_advice, fare_note = deterministic_fare_advice(request["flight_id"]), "advisor_unavailable"
+    except ValueError as exc:
+        log.warning("Fare advice rejected for %s; using catalog comparison", booking_id)
+        fare_advice, fare_note = deterministic_fare_advice(request["flight_id"]), f"advice_rejected: {exc}"[:200]
     _status(ctx, "holding_seat", booking_id=booking_id)
     held = yield ctx.call_activity(
         hold_seat,
@@ -50,7 +60,8 @@ def flight_booking_workflow(ctx: wf.DaprWorkflowContext, inp: dict):
             open_booking_approval,
             input={"workflow_id": workflow_id, "booking_id": booking_id, "request": request,
                    "expires_at": expires_at.isoformat(), "advice": advice,
-                   "payment_advice": payment_advice},
+                   "payment_advice": payment_advice, "fare_advice": fare_advice,
+                   "fare_advice_note": fare_note},
             retry_policy=RETRY,
         )
     except (wf.TaskFailedError, ValueError) as exc:
@@ -152,8 +163,18 @@ async def open_booking_approval(ctx: wf.WorkflowActivityContext, inp: dict) -> N
         inp["workflow_id"], inp["booking_id"], inp["expires_at"],
         {"flight_id": req["flight_id"], "seat": req["seat"], "passenger_name": req["passenger_name"],
          "price_cents": flight["price_cents"], "booking_advice": inp["advice"],
-         "payment_risk_advice": inp["payment_advice"]},
+         "payment_risk_advice": inp["payment_advice"], "fare_advice": inp.get("fare_advice"),
+         "fare_advice_note": inp.get("fare_advice_note")},
     )
+
+
+@runtime.activity(name="fare_itinerary_advice")
+async def fare_itinerary_advice(ctx: wf.WorkflowActivityContext, inp: dict) -> dict:
+    url = os.getenv("FARE_ADVISOR_URL", "http://127.0.0.1:8104/compare")
+    request = urllib.request.Request(
+        url, data=json.dumps(inp).encode(), headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return json.loads(response.read())
 
 
 @runtime.activity(name="simulate_payment")

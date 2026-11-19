@@ -306,6 +306,38 @@ class PostgresStore:
             row["ticket"] = dict(ticket) if ticket else None
             return row
 
+    def support_facts(self, booking_id: str) -> dict | None:
+        """Read-only, passenger-free facts for the support advisor (no names, payloads or tokens)."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT status, request FROM bookings WHERE booking_id = %s",
+                               (booking_id,)).fetchone()
+            if row is None:
+                return None
+            request = self._json_value(row["request"])
+            ticket = conn.execute("SELECT flight_id FROM tickets WHERE booking_id = %s", (booking_id,)).fetchone()
+            flight_id = ticket["flight_id"] if ticket else request.get("flight_id")
+            flight = conn.execute("SELECT origin, destination, depart_at FROM flight_inventory WHERE flight_id = %s",
+                                  (flight_id,)).fetchone()
+            payment = conn.execute("SELECT amount_cents, status FROM simulated_payments WHERE booking_id = %s",
+                                   (booking_id,)).fetchone()
+            cancellation = conn.execute(
+                """SELECT status, refund_cents FROM cancellations WHERE booking_id = %s
+                   ORDER BY requested_at DESC LIMIT 1""", (booking_id,)).fetchone()
+            refund = conn.execute(
+                "SELECT status, amount_cents FROM refunds WHERE booking_id = %s ORDER BY (status = 'issued') DESC LIMIT 1",
+                (booking_id,)).fetchone()
+            return {
+                "booking_status": row["status"], "flight_id": flight_id,
+                "origin": flight["origin"] if flight else None,
+                "destination": flight["destination"] if flight else None,
+                "depart_at": flight["depart_at"] if flight else None,
+                "paid_cents": payment["amount_cents"] if payment and payment["status"] == "paid" else None,
+                "payment_status": payment["status"] if payment else None,
+                "cancellation_status": cancellation["status"] if cancellation else None,
+                "refund_status": refund["status"] if refund else None,
+                "refund_cents": refund["amount_cents"] if refund else None,
+            }
+
     @staticmethod
     def _json_value(value):
         return json.loads(value) if isinstance(value, str) else value

@@ -7,6 +7,7 @@ import urllib.error
 import urllib.request
 
 BASE = os.getenv("FLIGHT_API_URL", "http://127.0.0.1:8000")
+SUPPORT_BASE = os.getenv("SUPPORT_SERVICE_URL", "http://127.0.0.1:8001")
 
 
 def request(method, path, body=None, headers=None, expected=(200, 202)):
@@ -74,6 +75,36 @@ def await_inbox(workflow_id, timeout=30):
         f"inbox item {workflow_id}",
         timeout,
     )
+
+
+def support_request(body, expected=(200,)):
+    req = urllib.request.Request(
+        SUPPORT_BASE + "/support/ask", data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code not in expected:
+            raise AssertionError(f"support ask: HTTP {exc.code}") from exc
+        return exc.code, json.loads(exc.read() or b"{}")
+
+
+def verify_support(booking_id):
+    before = booking(booking_id)["booking"]
+    _, answer = support_request(
+        {"booking_id": booking_id, "question": "Can I cancel and get a refund? Mail me at a.b@example.com"})
+    assert answer["authority"] == "advisory_only" and answer["source"] == "advisor", answer
+    assert answer["suggested_action"] == "request_cancellation" and answer["requires_human_approval"], answer
+    assert "example.com" not in json.dumps(answer), answer
+    after = booking(booking_id)["booking"]
+    assert before["status"] == after["status"] == "confirmed" and after["ticket"] == before["ticket"]
+    status, _ = support_request({"booking_id": "booking-missing", "question": "status?"}, expected=(404,))
+    assert status == 404
+    with urllib.request.urlopen(SUPPORT_BASE + "/support/status", timeout=10) as response:
+        counters = json.loads(response.read())["counters"]
+    assert counters["advisor"] >= 1 and counters["not_found"] >= 1, counters
+    print("[PASS] Support advisor answers read-only; booking unchanged; unknown booking is 404")
 
 
 def verify_restart_recovery():
@@ -213,10 +244,17 @@ def main():
         {"Idempotency-Key": "booking-idempotency"}, expected=(409,),
     )
     assert status == 409, "Idempotency key reuse with changed input was accepted"
-    await_inbox(happy["workflow_id"])
+    items = await_inbox(happy["workflow_id"])
+    proposal = next(item for item in items if item["workflow_id"] == happy["workflow_id"])["proposal"]
+    fare = proposal["fare_advice"]
+    assert fare["authority"] == "advisory_only" and fare["comparison"][0]["flight_id"] == "SA101", fare
+    assert {o["flight_id"] for o in fare["comparison"]} == set(fare["ranked_flight_ids"]), fare
     approve(happy["workflow_id"])
-    await_status(happy["booking_id"], "confirmed")
+    confirmed = await_status(happy["booking_id"], "confirmed")
+    assert confirmed["booking"]["ticket"]["flight_id"] == "SA101", "Fare advice changed the booked flight"
     print("[PASS] Booking idempotency and human approval")
+    print("[PASS] Fare advice appears in the approval proposal and does not change the booked flight")
+    verify_support(happy["booking_id"])
 
     ticket_failure = submit("ticketing-compensation", "SA101", "1B", "ticketing")
     await_inbox(ticket_failure["workflow_id"])
