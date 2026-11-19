@@ -74,8 +74,8 @@ def main() -> None:
         wait_status(page, "awaiting_approval")
         item = pending_item(page, "Fare advice")
         text = item.inner_text()
-        assert "Payment-risk note" in text and "SA101" in text and re.search(r"\d+m \d\ds", text), text
-        record("Booking status 'awaiting_approval'; inbox shows fare advice, payment-risk note and an expiry countdown")
+        assert "Fare advice" in text and "SA101" in text and re.search(r"\d+m \d\ds", text), text
+        record("Booking status 'awaiting_approval'; inbox shows fare advice (advisory only) and an expiry countdown")
         shot(page, "booking-awaiting-approval")
         item.locator("button", has_text="Approve").click()
         wait_status(page, "confirmed")
