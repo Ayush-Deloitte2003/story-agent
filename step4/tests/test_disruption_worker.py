@@ -8,12 +8,11 @@ from app import disruption_worker
 
 
 class DisruptionWorkerLifespanTests(unittest.IsolatedAsyncioTestCase):
-    def test_worker_declares_its_disruption_subscription(self):
-        self.assertEqual(
-            disruption_worker.subscriptions(),
-            [{"pubsubname": "pubsub", "topic": "flight-disruption",
-              "route": "/events/flight-disruption"}],
-        )
+    def test_worker_no_longer_exposes_pubsub_subscription(self):
+        paths = {route.path for route in disruption_worker.app.routes}
+        self.assertNotIn("/dapr/subscribe", paths)
+        self.assertNotIn("/events/flight-disruption", paths)
+        self.assertIn("/internal/disruptions/schedule", paths)
 
     async def test_fastapi_lifespan_starts_and_stops_dapr_runtime(self):
         self.assertIs(disruption_worker.app.router.lifespan_context, disruption_worker.lifespan)

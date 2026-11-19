@@ -16,13 +16,13 @@ advisors by default.
   literal `booking-advisor` sidecar provides read-only search/policy guidance,
   and `payment-advisor` provides simulated payment-risk guidance. Neither can
   choose the booking, hold a seat, charge, refund, or ticket.
-- `disruption-worker` consumes `flight-disruption` events and runs a separate
+- `disruption-worker` is scheduled by the API dispatcher for each accepted `flight-disruption` event and runs a separate
   durable rebooking workflow. Its literal `flight-advisor` container provides
   read-only disruption/rebooking recommendations; only the workflow can reserve
   an alternative or update a ticket, and only after human approval.
 - PostgreSQL stores domain records, holds, approvals, simulated payments, and
-  tickets. Dapr Workflow uses its supported Redis state store; Redis Pub/Sub
-  delivers disruption CloudEvents at least once.
+  tickets. Dapr Workflow uses its supported Redis state store. Event receipts,
+  quarantined events and dispatch records are also in PostgreSQL.
 
 ```mermaid
 flowchart LR
@@ -54,18 +54,18 @@ flowchart LR
 
   Client -->|booking request, inbox, decision| API
   API -->|booking and approval records| PG[(PostgreSQL domain records<br/>simulated payments and tickets)]
-  API_DAPR -->|schedule booking / raise booking decision| BW_DAPR
+  API_DAPR -->|leased reconciler: schedule booking by stable ID| BW_DAPR
+  API_DAPR -->|raise booking decision| BW_DAPR
   BW -->|holds, simulated charge, ticket| PG
   BW_DAPR -->|durable workflow checkpoints| State[Dapr Workflow state store]
 
-  API_DAPR -->|publish disruption CloudEvent| PS[Dapr Pub/Sub]
-  PS -->|at-least-once delivery| DW_DAPR
+  API -->|event receipts, quarantine, dispatch records| PG
+  API_DAPR -->|leased reconciler: schedule rebooking by stable ID| DW_DAPR
   API_DAPR -->|raise rebooking decision| DW_DAPR
   DW -->|proposal and approved rebooking| PG
   DW_DAPR -->|durable workflow checkpoints| State
 
   State --> Redis[(Redis)]
-  PS -. Redis-backed .-> Redis
 
   subgraph LIVE_LLM["Opt-in tagged live smoke only"]
     LLM[OpenAI API]
@@ -92,6 +92,17 @@ Retry with the same key and payload to get the same booking. Reusing the key
 with different input returns `409`. Query it at `GET /bookings/{booking_id}`.
 The booking workflow holds the selected mock seat until approval or expiry.
 
+Acceptance is durable: the booking row and a dispatch record are committed in
+one PostgreSQL transaction, then the API returns `202` with a body like
+`{"booking_id":"booking-…","workflow_id":"booking-…","status":"scheduled"}`
+(queued, not necessarily running; poll `GET /bookings/{booking_id}`, which
+reports `QUEUED` until the workflow starts). If Dapr
+or a worker is temporarily down afterwards, a leased reconciler in the API
+(`FOR UPDATE SKIP LOCKED`, 30 s lease, exponential backoff capped at 30 s)
+keeps retrying; workers schedule by stable workflow ID, so redelivery is
+harmless. Errors before the commit (validation, idempotency conflict) remain
+errors.
+
 `GET /inbox` lists pending human decisions; `GET /inbox/{workflow_id}` returns
 the current state of one approval, including completed rebookings. Approve or reject with
 `POST /inbox/{workflow_id}/decision` and `{"decision":"approve"}` or
@@ -105,9 +116,16 @@ Publish a disruption with `POST /disruptions`:
 {"id":"airline-event-17","source":"mock-ops","booking_id":"booking-id","flight_id":"SA101"}
 ```
 
-The source and event ID determine a stable workflow ID. Re-delivery does not
-start another rebooking workflow. The CloudEvent payload contains no passenger
-or payment data.
+The event registry (`app/events.py`) maps `com.example.flight.disrupted`
+(the default type; flat or CloudEvent-style `data` body) to its schema and
+worker. A valid event is recorded in `event_receipts` with a dispatch record
+and returns `202` `accepted`; the same `(source, id)` and payload returns
+`duplicate`, a changed payload returns `409`. Unknown types or invalid data
+return `202` `quarantined` and are stored in `quarantined_events` with the
+reason instead of being dropped. Workflow IDs derive from source and event ID,
+so re-delivery never starts another rebooking workflow. Events carry no
+passenger or payment data. Approvals, simulated payments and flights are
+unchanged; there is no poller or dashboard.
 
 ## Run and verify
 

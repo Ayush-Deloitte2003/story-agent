@@ -20,6 +20,15 @@ jobs:
   kind:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: flights
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
     defaults:
       run:
         shell: bash
@@ -31,7 +40,9 @@ jobs:
           python-version: "3.12"
       - name: Install Step 4 dependencies
         run: python -m pip install -r requirements.txt
-      - name: Deterministic contract tests
+      - name: Deterministic contract tests (including PostgreSQL concurrency)
+        env:
+          DATABASE_URL: postgresql://postgres:test@localhost:5432/flights
         run: python -m unittest discover -s tests -v
       - name: Create Kind cluster
         uses: helm/kind-action@v1

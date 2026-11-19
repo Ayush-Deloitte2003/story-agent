@@ -47,6 +47,24 @@ class PostgresStore:
                     status TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
                     proposal JSONB NOT NULL, decision JSONB
                 );
+                CREATE TABLE IF NOT EXISTS event_receipts (
+                    source TEXT NOT NULL, event_id TEXT NOT NULL, event_type TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL, payload JSONB NOT NULL, workflow_id TEXT NOT NULL,
+                    received_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (source, event_id)
+                );
+                CREATE TABLE IF NOT EXISTS quarantined_events (
+                    quarantine_id TEXT PRIMARY KEY, reason TEXT NOT NULL, event_type TEXT,
+                    source TEXT, event_id TEXT, raw JSONB NOT NULL,
+                    quarantined_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+                CREATE TABLE IF NOT EXISTS dispatch_records (
+                    dispatch_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, app_id TEXT NOT NULL,
+                    method TEXT NOT NULL, payload JSONB NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0, lease_owner TEXT, lease_expires_at TIMESTAMPTZ,
+                    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_error TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(), dispatched_at TIMESTAMPTZ
+                );
+                CREATE INDEX IF NOT EXISTS dispatch_due ON dispatch_records(status, next_attempt_at);
             """
             for statement in ddl.split(";"):
                 if statement.strip():
@@ -73,6 +91,11 @@ class PostgresStore:
                 (workflow_id, idempotency_key, json.dumps(request)),
             ).fetchone()
             if row:
+                from app.events import BOOKING_REQUESTED, REGISTRY
+                spec = REGISTRY[BOOKING_REQUESTED]
+                self._insert_dispatch(conn, workflow_id, spec.name, spec.app_id, spec.method, {
+                    "workflow_id": workflow_id, "booking_id": workflow_id, "request": request,
+                })
                 return row, True
             row = conn.execute(
                 "SELECT * FROM bookings WHERE idempotency_key = %s", (idempotency_key,)
@@ -80,6 +103,120 @@ class PostgresStore:
             if row["request"] != request:
                 raise ValueError("Idempotency key was already used for a different booking")
             return row, False
+
+    @staticmethod
+    def _insert_dispatch(conn, dispatch_id, event_type, app_id, method, payload) -> None:
+        conn.execute(
+            """INSERT INTO dispatch_records(dispatch_id, event_type, app_id, method, payload)
+               VALUES (%s, %s, %s, %s, %s) ON CONFLICT (dispatch_id) DO NOTHING""",
+            (dispatch_id, event_type, app_id, method, json.dumps(payload)),
+        )
+
+    def accept_event(self, accepted) -> tuple[str, bool]:
+        """Atomically record a receipt and its dispatch intent.
+
+        Returns (workflow_id, created). Raises ValueError if the same
+        (source, id) was already received with a different payload.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """INSERT INTO event_receipts(source, event_id, event_type, payload_hash, payload, workflow_id)
+                   VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (source, event_id) DO NOTHING
+                   RETURNING workflow_id""",
+                (accepted.source, accepted.event_id, accepted.event_type.name, accepted.payload_hash,
+                 json.dumps(accepted.data), accepted.workflow_id),
+            ).fetchone()
+            if row:
+                self._insert_dispatch(
+                    conn, accepted.workflow_id, accepted.event_type.name, accepted.event_type.app_id,
+                    accepted.event_type.method, {**accepted.data, "event_id": accepted.event_id,
+                                                 "source": accepted.source,
+                                                 "workflow_id": accepted.workflow_id},
+                )
+                return accepted.workflow_id, True
+            existing = conn.execute(
+                "SELECT payload_hash, workflow_id FROM event_receipts WHERE source = %s AND event_id = %s",
+                (accepted.source, accepted.event_id),
+            ).fetchone()
+            if existing["payload_hash"] != accepted.payload_hash:
+                raise ValueError("Event id was already received with a different payload")
+            return existing["workflow_id"], False
+
+    def receipt(self, source: str, event_id: str) -> dict | None:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT workflow_id, payload_hash FROM event_receipts WHERE source = %s AND event_id = %s",
+                (source, event_id),
+            ).fetchone()
+
+    def quarantine_event(self, quarantined, raw) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO quarantined_events(quarantine_id, reason, event_type, source, event_id, raw)
+                   VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (quarantine_id) DO NOTHING""",
+                (quarantined.quarantine_id, quarantined.reason, quarantined.event_type,
+                 quarantined.source, quarantined.event_id, json.dumps(raw, default=str)),
+            )
+
+    def lease_dispatches(self, owner: str, limit: int = 10, lease_seconds: int = 30,
+                         dispatch_id: str | None = None) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """UPDATE dispatch_records SET status = 'leased', lease_owner = %s, attempts = attempts + 1,
+                   lease_expires_at = now() + (%s * interval '1 second')
+                   WHERE dispatch_id IN (
+                     SELECT dispatch_id FROM dispatch_records
+                     WHERE ((status = 'pending' AND next_attempt_at <= now())
+                            OR (status = 'leased' AND lease_expires_at <= now()))
+                       AND (%s::text IS NULL OR dispatch_id = %s::text)
+                     ORDER BY created_at LIMIT %s FOR UPDATE SKIP LOCKED)
+                   RETURNING *""",
+                (owner, lease_seconds, dispatch_id, dispatch_id, limit),
+            ).fetchall()
+            for row in rows:
+                row["payload"] = self._json_value(row["payload"])
+            return rows
+
+    def complete_dispatch(self, dispatch_id: str, owner: str) -> bool:
+        with self._connect() as conn:
+            return conn.execute(
+                """UPDATE dispatch_records SET status = 'dispatched', dispatched_at = now(),
+                   lease_owner = NULL, lease_expires_at = NULL, last_error = NULL
+                   WHERE dispatch_id = %s AND status = 'leased' AND lease_owner = %s
+                   RETURNING dispatch_id""",
+                (dispatch_id, owner),
+            ).fetchone() is not None
+
+    def release_dispatch(self, dispatch_id: str, owner: str, error: str, delay_seconds: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE dispatch_records SET status = 'pending', lease_owner = NULL,
+                   lease_expires_at = NULL, last_error = %s,
+                   next_attempt_at = now() + (%s * interval '1 second')
+                   WHERE dispatch_id = %s AND status = 'leased' AND lease_owner = %s""",
+                (error[:200], delay_seconds, dispatch_id, owner),
+            )
+
+    def workflow_started(self, record: dict) -> bool:
+        """True when domain records prove the workflow already ran, even if Dapr history was purged."""
+        with self._connect() as conn:
+            if record["event_type"] == "com.example.booking.requested":
+                row = conn.execute(
+                    "SELECT 1 FROM bookings WHERE booking_id = %s AND status <> 'scheduled'",
+                    (record["dispatch_id"],),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT 1 FROM approval_inbox WHERE workflow_id = %s", (record["dispatch_id"],)
+                ).fetchone()
+            return row is not None
+
+    def dispatch_record(self, dispatch_id: str) -> dict | None:
+        with self._connect() as conn:
+            return conn.execute(
+                """SELECT dispatch_id, event_type, status, attempts, last_error
+                   FROM dispatch_records WHERE dispatch_id = %s""", (dispatch_id,),
+            ).fetchone()
 
     def booking(self, booking_id: str) -> dict | None:
         with self._connect() as conn:

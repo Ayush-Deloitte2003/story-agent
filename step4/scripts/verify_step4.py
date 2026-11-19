@@ -161,6 +161,14 @@ def main():
     first = request("POST", "/disruptions", event)[1]
     second = request("POST", "/disruptions", event)[1]
     assert first["workflow_id"] == second["workflow_id"]
+    assert (first["status"], second["status"]) == ("accepted", "duplicate"), (first, second)
+    status, _ = request("POST", "/disruptions", {**event, "flight_id": "SA201"}, expected=(409,))
+    assert status == 409, "Event id reuse with a different payload was accepted"
+    for bad in ({"id": "bad-1", "source": "step4-verification", "booking_id": disrupted},
+                {"id": "bad-2", "source": "step4-verification", "type": "com.example.unknown",
+                 "data": {"booking_id": disrupted, "flight_id": "SA101"}}):
+        quarantined = request("POST", "/disruptions", bad)[1]
+        assert quarantined["status"] == "quarantined", quarantined
     items = await_inbox(first["workflow_id"])
     recommendation = next(item for item in items if item["workflow_id"] == first["workflow_id"])
     time.sleep(2)

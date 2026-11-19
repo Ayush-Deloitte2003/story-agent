@@ -1,10 +1,10 @@
 import asyncio
-import hashlib
 import json
 from contextlib import asynccontextmanager
 
 import dapr.ext.workflow as wf
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
 from app.disruption_workflow import flight_rebooking_workflow, runtime
 
@@ -42,22 +42,8 @@ async def workflow_state(workflow_id: str):
     }
 
 
-@app.get("/dapr/subscribe")
-def subscriptions():
-    return [{"pubsubname": "pubsub", "topic": "flight-disruption",
-             "route": "/events/flight-disruption"}]
-
-
-@app.post("/events/flight-disruption")
-async def flight_disruption(event: dict):
-    data = event.get("data") or {}
-    event_id = event.get("id")
-    source = event.get("source")
-    booking_id = data.get("booking_id")
-    flight_id = data.get("flight_id")
-    if not all(isinstance(value, str) and value for value in (event_id, source, booking_id, flight_id)):
-        return {"status": "DROP"}
-    workflow_id = "disruption-" + hashlib.sha256(f"{source}:{event_id}".encode()).hexdigest()[:40]
+async def _schedule(workflow_id: str, booking_id: str, flight_id: str) -> bool:
+    """Start the workflow once; stable IDs make repeated calls harmless. Returns False to retry."""
     try:
         state = await asyncio.to_thread(client.get_workflow_state, workflow_id, fetch_payloads=False)
         if state is None:
@@ -69,8 +55,23 @@ async def flight_disruption(event: dict):
     except Exception:
         state = await asyncio.to_thread(client.get_workflow_state, workflow_id, fetch_payloads=False)
         if state is None:
-            return {"status": "RETRY"}
-    return {"status": "SUCCESS"}
+            return False
+    return True
+
+
+class DispatchEvent(BaseModel):
+    workflow_id: str
+    booking_id: str
+    flight_id: str
+    event_id: str | None = None
+    source: str | None = None
+
+
+@app.post("/internal/disruptions/schedule")
+async def schedule_disruption(event: DispatchEvent):
+    if not await _schedule(event.workflow_id, event.booking_id, event.flight_id):
+        raise HTTPException(503, "Workflow could not be scheduled")
+    return {"workflow_id": event.workflow_id, "scheduled": True}
 
 
 @app.post("/internal/approval/raise")
