@@ -1,0 +1,88 @@
+name: step4-ui-demo
+
+# Never runs on routine pushes: only a dedicated tag, or a push that touches the
+# demo script or this workflow file. Mock advisors, simulated data, no secrets.
+on:
+  push:
+    tags:
+      - "step4-ui-demo-*"
+    branches:
+      - ayush-deloitte2003-dapr-flight-booking
+    paths:
+      - "step4/ui-demo/**"
+      - ".github/workflows/step4-ui-demo.yml"
+
+permissions:
+  contents: read
+
+env:
+  CLUSTER: flight-booking
+  DAPR_CLI_VERSION: 1.18.2
+  DAPR_RUNTIME_VERSION: 1.19.0
+  AGENT_MODE: mock
+
+jobs:
+  ui-demo:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: step4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ${{ env.CLUSTER }}
+      - name: Install Dapr
+        run: |
+          wget -q https://raw.githubusercontent.com/dapr/cli/master/install/install.sh -O - | /bin/bash -s "$DAPR_CLI_VERSION"
+          dapr init -k --runtime-version "$DAPR_RUNTIME_VERSION" --wait --timeout 600
+      - name: Build and load simulated flight image
+        run: |
+          docker build -t flight-booking:dev .
+          kind load docker-image flight-booking:dev --name "$CLUSTER"
+      - name: Deploy Step 4 (mock advisors; simulation enabled for this demo run only)
+        run: |
+          kubectl apply -f k8s/redis.yaml -f k8s/postgres.yaml
+          kubectl rollout status deployment/step4-redis --timeout=180s
+          kubectl rollout status deployment/step4-postgres --timeout=180s
+          kubectl apply -f k8s/components.yaml -f k8s/apps.yaml
+          bash ui-demo/enable-simulation.sh
+          for d in flight-api booking-worker disruption-worker cancellation-worker support-service; do kubectl rollout status "deployment/$d" --timeout=300s; done
+      - name: Drive the UI in headless Chromium
+        run: |
+          set -euo pipefail
+          python -m pip install -r requirements.txt playwright
+          python -m playwright install --with-deps chromium
+          kubectl port-forward svc/flight-api 8000:8000 >/tmp/pf-api.log 2>&1 &
+          api_pid=$!
+          kubectl port-forward svc/support-service 8001:8000 >/tmp/pf-support.log 2>&1 &
+          support_pid=$!
+          trap 'kill "$api_pid" "$support_pid" 2>/dev/null || true' EXIT
+          for port in 8000 8001; do
+            for _ in {1..30}; do
+              curl --fail --silent "http://127.0.0.1:$port/healthz" >/dev/null && break
+              sleep 2
+            done
+          done
+          python ui-demo/capture_ui.py
+      - name: Upload screenshots (simulated data only, 1 day)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: step4-ui-screenshots
+          path: step4/shots/
+          retention-days: 1
+          if-no-files-found: warn
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl get pods -A
+          kubectl logs deployment/flight-api --all-containers --tail=150 || true
+          kubectl logs deployment/booking-worker --all-containers --tail=150 || true
+          kubectl logs deployment/cancellation-worker --all-containers --tail=150 || true
