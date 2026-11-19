@@ -13,7 +13,7 @@ from app import api
 
 PAGE = Path(api.UI_PAGE)
 HTML = PAGE.read_text(encoding="utf-8")
-LOGIC = HTML.split("/* LOGIC-START", 1)[1].split("/* LOGIC-END */", 1)[0]
+LOGIC = HTML.split("/* LOGIC-START", 1)[1].split("*/", 1)[1].split("/* LOGIC-END */", 1)[0]
 NODE = shutil.which("node")
 
 HARNESS = r"""
