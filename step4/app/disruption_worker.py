@@ -42,11 +42,13 @@ async def workflow_state(workflow_id: str):
     }
 
 
-async def _schedule(workflow_id: str, booking_id: str, flight_id: str) -> bool:
-    """Start the workflow once; stable IDs make repeated calls harmless. Returns False to retry."""
+async def _schedule(workflow_id: str, booking_id: str, flight_id: str) -> bool | None:
+    """Start the workflow once. Returns whether it already existed; None means retry."""
+    existed = True
     try:
         state = await asyncio.to_thread(client.get_workflow_state, workflow_id, fetch_payloads=False)
         if state is None:
+            existed = False
             await asyncio.to_thread(
                 client.schedule_new_workflow, flight_rebooking_workflow,
                 input={"booking_id": booking_id, "flight_id": flight_id},
@@ -55,8 +57,9 @@ async def _schedule(workflow_id: str, booking_id: str, flight_id: str) -> bool:
     except Exception:
         state = await asyncio.to_thread(client.get_workflow_state, workflow_id, fetch_payloads=False)
         if state is None:
-            return False
-    return True
+            return None
+        existed = True
+    return existed
 
 
 class DispatchEvent(BaseModel):
@@ -69,9 +72,10 @@ class DispatchEvent(BaseModel):
 
 @app.post("/internal/disruptions/schedule")
 async def schedule_disruption(event: DispatchEvent):
-    if not await _schedule(event.workflow_id, event.booking_id, event.flight_id):
+    existed = await _schedule(event.workflow_id, event.booking_id, event.flight_id)
+    if existed is None:
         raise HTTPException(503, "Workflow could not be scheduled")
-    return {"workflow_id": event.workflow_id, "scheduled": True}
+    return {"workflow_id": event.workflow_id, "scheduled": True, "already_existed": existed}
 
 
 @app.post("/internal/approval/raise")

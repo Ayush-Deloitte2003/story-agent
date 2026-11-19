@@ -9,10 +9,13 @@ from app.store import PostgresStore
 REQUEST = {"flight_id": "SA101", "seat": "1A", "passenger_name": "Test", "hold_seconds": 60, "failure_at": None}
 
 
-@unittest.skipUnless(os.getenv("DATABASE_URL"), "requires PostgreSQL via DATABASE_URL")
+@unittest.skipUnless(os.getenv("DATABASE_URL") or os.getenv("REQUIRE_POSTGRES_TESTS"),
+                     "requires PostgreSQL via DATABASE_URL")
 class PostgresConcurrencyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if not os.getenv("DATABASE_URL"):
+            raise RuntimeError("REQUIRE_POSTGRES_TESTS is set but DATABASE_URL is missing")
         cls.store = PostgresStore()
         cls.store.initialize()
 
@@ -60,6 +63,42 @@ class PostgresConcurrencyTests(unittest.TestCase):
         self.assertFalse(self.store.complete_dispatch(workflow_id, loser))
         self.assertTrue(self.store.complete_dispatch(workflow_id, winner))
         self.assertEqual(self.store.lease_dispatches("c", 10, 30, workflow_id), [])
+
+    def test_marker_survives_and_blocks_reinvocation_after_lease_expiry(self):
+        from app import dispatcher
+        workflow_id = "booking-" + uuid.uuid4().hex
+        self.store.create_booking(workflow_id, f"key-{uuid.uuid4()}", dict(REQUEST))
+        calls = []
+
+        def invoke(_app, _method, body):
+            calls.append(body)
+            return {"scheduled": True, "already_existed": False}
+
+        self.assertEqual(dispatcher.dispatch_due(self.store, invoke, dispatch_id=workflow_id, owner="a"), 1)
+        with self.store._connect() as conn:  # simulate a replayed lease after Dapr history was purged
+            conn.execute("UPDATE dispatch_records SET status = 'leased', lease_owner = 'z', "
+                         "lease_expires_at = now() WHERE dispatch_id = %s", (workflow_id,))
+        self.assertEqual(dispatcher.dispatch_due(self.store, invoke, dispatch_id=workflow_id, owner="b"), 1)
+        self.assertEqual(len(calls), 1)
+        self.assertIsNotNone(self.store.dispatch_record(workflow_id)["scheduled_at"])
+
+    def test_mark_scheduled_is_bound_to_the_lease_owner(self):
+        workflow_id = "booking-" + uuid.uuid4().hex
+        self.store.create_booking(workflow_id, f"key-{uuid.uuid4()}", dict(REQUEST))
+        self.assertEqual(len(self.store.lease_dispatches("a", 10, 30, workflow_id)), 1)
+        self.assertFalse(self.store.mark_scheduled(workflow_id, "b"))
+        self.assertTrue(self.store.mark_scheduled(workflow_id, "a"))
+
+    def test_additive_migration_backfills_marker_for_previously_dispatched_rows(self):
+        workflow_id = "booking-" + uuid.uuid4().hex
+        self.store.create_booking(workflow_id, f"key-{uuid.uuid4()}", dict(REQUEST))
+        self.store.lease_dispatches("a", 10, 30, workflow_id)
+        self.assertTrue(self.store.complete_dispatch(workflow_id, "a"))
+        with self.store._connect() as conn:  # emulate the previous schema
+            conn.execute("ALTER TABLE dispatch_records DROP COLUMN scheduled_at")
+        self.store.initialize()
+        self.store.initialize()  # re-running is a no-op
+        self.assertIsNotNone(self.store.dispatch_record(workflow_id)["scheduled_at"])
 
     def test_expired_lease_is_reclaimed_and_started_workflow_is_detected(self):
         workflow_id = "booking-" + uuid.uuid4().hex

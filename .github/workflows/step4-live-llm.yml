@@ -14,12 +14,23 @@ permissions:
 jobs:
   mock-tests:
     runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: flights
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
     defaults:
       run:
         shell: bash
         working-directory: step4
     env:
       AGENT_MODE: mock
+      DATABASE_URL: postgresql://postgres:test@localhost:5432/flights
+      REQUIRE_POSTGRES_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

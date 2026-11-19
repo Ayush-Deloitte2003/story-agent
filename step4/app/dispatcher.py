@@ -23,12 +23,13 @@ def dispatch_due(store, invoke, limit: int = 10, dispatch_id: str | None = None,
     delivered = 0
     for record in store.lease_dispatches(owner, limit, LEASE_SECONDS, dispatch_id):
         try:
-            if store.workflow_started(record):
-                # Never reschedule: the workflow already ran, and Dapr history may have been purged.
-                if store.complete_dispatch(record["dispatch_id"], owner):
-                    delivered += 1
-                continue
-            invoke(record["app_id"], record["method"], record["payload"])
+            # The durable marker, not Dapr history, decides whether a worker is invoked.
+            if not record.get("scheduled_at") and not store.workflow_started(record):
+                confirmation = invoke(record["app_id"], record["method"], record["payload"])
+                if not (isinstance(confirmation, dict) and confirmation.get("scheduled")):
+                    raise RuntimeError("Worker did not confirm scheduling")
+            if not store.mark_scheduled(record["dispatch_id"], owner):
+                continue  # lease lost to another replica; it will finish or retry
         except Exception as exc:  # any failure, including HTTPException, is retried later
             LOG.warning("dispatch %s attempt %s failed: %s", record["dispatch_id"],
                         record["attempts"], type(exc).__name__)

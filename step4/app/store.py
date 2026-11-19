@@ -65,6 +65,9 @@ class PostgresStore:
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(), dispatched_at TIMESTAMPTZ
                 );
                 CREATE INDEX IF NOT EXISTS dispatch_due ON dispatch_records(status, next_attempt_at);
+                ALTER TABLE dispatch_records ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ;
+                UPDATE dispatch_records SET scheduled_at = dispatched_at
+                    WHERE status = 'dispatched' AND scheduled_at IS NULL;
             """
             for statement in ddl.split(";"):
                 if statement.strip():
@@ -177,6 +180,16 @@ class PostgresStore:
                 row["payload"] = self._json_value(row["payload"])
             return rows
 
+    def mark_scheduled(self, dispatch_id: str, owner: str) -> bool:
+        """Durably record that a worker confirmed the workflow exists (new or already present)."""
+        with self._connect() as conn:
+            return conn.execute(
+                """UPDATE dispatch_records SET scheduled_at = COALESCE(scheduled_at, now())
+                   WHERE dispatch_id = %s AND status = 'leased' AND lease_owner = %s
+                   RETURNING dispatch_id""",
+                (dispatch_id, owner),
+            ).fetchone() is not None
+
     def complete_dispatch(self, dispatch_id: str, owner: str) -> bool:
         with self._connect() as conn:
             return conn.execute(
@@ -214,7 +227,7 @@ class PostgresStore:
     def dispatch_record(self, dispatch_id: str) -> dict | None:
         with self._connect() as conn:
             return conn.execute(
-                """SELECT dispatch_id, event_type, status, attempts, last_error
+                """SELECT dispatch_id, event_type, status, attempts, last_error, scheduled_at
                    FROM dispatch_records WHERE dispatch_id = %s""", (dispatch_id,),
             ).fetchone()
 

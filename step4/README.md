@@ -99,9 +99,22 @@ one PostgreSQL transaction, then the API returns `202` with a body like
 reports `QUEUED` until the workflow starts). If Dapr
 or a worker is temporarily down afterwards, a leased reconciler in the API
 (`FOR UPDATE SKIP LOCKED`, 30 s lease, exponential backoff capped at 30 s)
-keeps retrying; workers schedule by stable workflow ID, so redelivery is
-harmless. Errors before the commit (validation, idempotency conflict) remain
-errors.
+keeps retrying; workers schedule by stable workflow ID. Errors before the
+commit (validation, idempotency conflict) remain errors.
+
+Delivery guarantee: **at-least-once delivery with idempotent effects** (not
+exactly-once). When a worker confirms scheduling, or reports that the workflow
+already exists, the dispatcher writes a durable `scheduled_at` marker on the
+dispatch record. The reconciler checks that marker, not Dapr workflow history,
+before invoking a worker, so purging Dapr history after the marker exists
+cannot cause rescheduling. A crash between Dapr scheduling and the marker write
+causes one redelivery with the same stable workflow ID, which the worker treats
+as already existing. A replica whose lease was taken over cannot write the
+marker or complete the record. The column is added with
+`ADD COLUMN IF NOT EXISTS` and backfilled for already-dispatched rows. Residual
+gap: if history is purged in the window between Dapr scheduling and the marker
+write, and no booking or approval row exists yet, a redelivery could start the
+workflow again.
 
 `GET /inbox` lists pending human decisions; `GET /inbox/{workflow_id}` returns
 the current state of one approval, including completed rebookings. Approve or reject with

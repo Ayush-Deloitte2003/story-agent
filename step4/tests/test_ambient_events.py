@@ -10,10 +10,12 @@ DISRUPTION = {"id": "evt-1", "source": "tests", "booking_id": "booking-1", "flig
 
 
 class FakeDispatchStore:
+    """In-memory stand-in with the same lease/owner semantics as PostgresStore."""
+
     def __init__(self):
         self.records = {"d1": {"dispatch_id": "d1", "app_id": "booking-worker", "method": "m",
-                               "event_type": "com.example.booking.requested",
-                               "payload": {"x": 1}, "attempts": 0, "status": "pending"}}
+                               "event_type": "com.example.booking.requested", "scheduled_at": None,
+                               "payload": {"x": 1}, "attempts": 0, "status": "pending", "owner": None}}
         self.delays = []
         self.errors = []
         self.started = False
@@ -21,21 +23,45 @@ class FakeDispatchStore:
     def workflow_started(self, _record):
         return self.started
 
+    def expire_lease(self, dispatch_id="d1"):
+        self.records[dispatch_id]["status"] = "expired"
+
     def lease_dispatches(self, owner, limit, lease_seconds, dispatch_id=None):
-        due = [r for r in self.records.values() if r["status"] == "pending"
-               and dispatch_id in (None, r["dispatch_id"])]
+        due = [r for r in self.records.values() if r["status"] in ("pending", "expired")
+               and dispatch_id in (None, r["dispatch_id"])][:limit]
         for record in due:
             record.update(status="leased", attempts=record["attempts"] + 1, owner=owner)
         return [dict(r) for r in due]
 
+    def _owned(self, dispatch_id, owner):
+        record = self.records[dispatch_id]
+        return record["status"] == "leased" and record["owner"] == owner
+
+    def mark_scheduled(self, dispatch_id, owner):
+        if not self._owned(dispatch_id, owner):
+            return False
+        self.records[dispatch_id]["scheduled_at"] = self.records[dispatch_id]["scheduled_at"] or "now"
+        return True
+
     def complete_dispatch(self, dispatch_id, owner):
+        if not self._owned(dispatch_id, owner):
+            return False
         self.records[dispatch_id]["status"] = "dispatched"
         return True
 
     def release_dispatch(self, dispatch_id, owner, error, delay):
-        self.records[dispatch_id]["status"] = "pending"
+        if self._owned(dispatch_id, owner):
+            self.records[dispatch_id]["status"] = "pending"
         self.errors.append(error)
         self.delays.append(delay)
+
+
+def confirm(calls=None):
+    def invoke(app_id, method, body):
+        if calls is not None:
+            calls.append(body)
+        return {"scheduled": True}
+    return invoke
 
 
 class EventRegistryTests(unittest.TestCase):
@@ -85,32 +111,91 @@ class DispatcherTests(unittest.TestCase):
                                  schedule_new_workflow=lambda *a, **k: scheduled.append(a))
         request = booking_worker.ScheduleRequest(workflow_id="w", booking_id="w", request={})
         with patch.object(booking_worker, "client", client):
-            asyncio.run(booking_worker.schedule(request))
+            result = asyncio.run(booking_worker.schedule(request))
         self.assertEqual(scheduled, [])
+        self.assertEqual(result["already_existed"], True)
 
-    def test_crash_after_scheduling_before_completion_redelivers_same_payload(self):
+    def test_disruption_worker_reports_existing_and_new_workflows(self):
+        import asyncio
+        from types import SimpleNamespace
+        from app import disruption_worker
+        scheduled, states = [], [None, object()]
+        client = SimpleNamespace(get_workflow_state=lambda *a, **k: states[0],
+                                 schedule_new_workflow=lambda *a, **k: scheduled.append(a))
+        event = disruption_worker.DispatchEvent(workflow_id="w", booking_id="b", flight_id="SA101")
+        with patch.object(disruption_worker, "client", client):
+            created = asyncio.run(disruption_worker.schedule_disruption(event))
+            states[0] = states[1]
+            existing = asyncio.run(disruption_worker.schedule_disruption(event))
+        self.assertEqual((created["already_existed"], existing["already_existed"]), (False, True))
+        self.assertEqual(len(scheduled), 1)
+
+    def test_crash_after_dapr_scheduling_before_marker_redelivers_safely(self):
         store = FakeDispatchStore()
         delivered = []
-        real_complete = store.complete_dispatch
 
         def crash(*_args):
-            raise RuntimeError("process died before database update")
+            raise RuntimeError("process died before the marker was written")
 
-        store.complete_dispatch = crash
+        real_mark = store.mark_scheduled
+        store.mark_scheduled = crash
+        invoke = confirm(delivered)
+        # Dapr accepted the workflow, then the dispatcher died: no marker, record still leased.
+        self.assertEqual(dispatcher.dispatch_due(store, invoke, owner="a"), 0)
+        self.assertIsNone(store.records["d1"]["scheduled_at"])
+        store.expire_lease()
+        store.mark_scheduled = real_mark
+        self.assertEqual(dispatcher.dispatch_due(store, invoke, owner="b"), 1)
+        self.assertEqual(delivered, [{"x": 1}, {"x": 1}])  # same payload, same stable workflow ID
+        self.assertEqual(store.records["d1"]["scheduled_at"], "now")
+
+    def test_crash_after_marker_before_completion_does_not_reinvoke(self):
+        store = FakeDispatchStore()
+        calls = []
+        store.complete_dispatch = lambda *_a: (_ for _ in ()).throw(RuntimeError("died"))
         with self.assertRaises(RuntimeError):
-            dispatcher.dispatch_due(store, lambda *a: delivered.append(a[2]))
-        self.assertEqual(store.records["d1"]["status"], "leased")
-        self.assertEqual(dispatcher.dispatch_due(store, lambda *a: delivered.append(a[2])), 0)
-        store.records["d1"]["status"] = "pending"  # lease expiry
-        store.complete_dispatch = real_complete
-        self.assertEqual(dispatcher.dispatch_due(store, lambda *a: delivered.append(a[2])), 1)
-        self.assertEqual(delivered, [{"x": 1}, {"x": 1}])
+            dispatcher.dispatch_due(store, confirm(calls), owner="a")
+        self.assertEqual(store.records["d1"]["scheduled_at"], "now")
+        store.expire_lease()
+        del store.complete_dispatch
+        self.assertEqual(dispatcher.dispatch_due(store, confirm(calls), owner="b"), 1)
+        self.assertEqual(len(calls), 1)
 
-    def test_started_workflow_is_never_rescheduled_even_after_history_purge(self):
+    def test_marker_prevents_rescheduling_after_dapr_history_purge(self):
+        store = FakeDispatchStore()
+        calls = []
+        self.assertEqual(dispatcher.dispatch_due(store, confirm(calls)), 1)
+        # Simulate a purged workflow and a replayed/reset lease: marker still blocks the worker call.
+        store.records["d1"]["status"] = "expired"
+        self.assertEqual(dispatcher.dispatch_due(store, confirm(calls)), 1)
+        self.assertEqual(len(calls), 1)
+
+    def test_replica_that_lost_its_lease_cannot_mark_or_complete(self):
+        store = FakeDispatchStore()
+        calls = []
+
+        def slow_invoke(*args):
+            calls.append(args[2])
+            store.expire_lease()
+            dispatcher.dispatch_due(store, confirm(calls), owner="b")  # replica b takes over
+            return {"scheduled": True}
+
+        self.assertEqual(dispatcher.dispatch_due(store, slow_invoke, owner="a"), 0)
+        self.assertEqual(store.records["d1"]["status"], "dispatched")
+        self.assertEqual(store.records["d1"]["owner"], "b")
+        self.assertEqual(len(calls), 2)  # at-least-once; the worker treats the repeat as existing
+
+    def test_unconfirmed_worker_response_is_retried(self):
+        store = FakeDispatchStore()
+        self.assertEqual(dispatcher.dispatch_due(store, lambda *a: {}), 0)
+        self.assertIsNone(store.records["d1"]["scheduled_at"])
+        self.assertEqual(store.records["d1"]["status"], "pending")
+
+    def test_started_workflow_is_never_rescheduled_when_domain_rows_exist(self):
         store = FakeDispatchStore()
         store.started = True
         calls = []
-        self.assertEqual(dispatcher.dispatch_due(store, lambda *a: calls.append(a)), 1)
+        self.assertEqual(dispatcher.dispatch_due(store, confirm(calls)), 1)
         self.assertEqual(calls, [])
         self.assertEqual(store.records["d1"]["status"], "dispatched")
 
@@ -134,6 +219,7 @@ class DispatcherTests(unittest.TestCase):
             calls.append(body)
             if len(calls) < 3:
                 raise HTTPException(503, "down")
+            return {"scheduled": True}
 
         self.assertEqual(dispatcher.dispatch_due(store, invoke), 0)
         self.assertEqual(dispatcher.dispatch_due(store, invoke), 0)
@@ -152,7 +238,8 @@ class ApiAcceptanceTests(unittest.TestCase):
             patch.object(api.store, "create_booking", return_value=(booking, True)),
             patch.object(api.store, "lease_dispatches", return_value=[{
                 "dispatch_id": "booking-x", "app_id": "booking-worker", "method": "m",
-                "payload": {}, "attempts": 1}]),
+                "payload": {}, "attempts": 1, "event_type": "x", "scheduled_at": None}]),
+            patch.object(api.store, "workflow_started", return_value=False),
             patch.object(api.store, "release_dispatch") as release,
             patch("app.api._invoke", side_effect=HTTPException(503, "down")),
         ):

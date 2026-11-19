@@ -43,9 +43,11 @@ def healthz():
 
 @app.post("/internal/bookings/schedule")
 async def schedule(request: ScheduleRequest):
+    existed = True
     try:
         state = await asyncio.to_thread(client.get_workflow_state, request.workflow_id, fetch_payloads=False)
         if state is None:
+            existed = False
             await asyncio.to_thread(
                 client.schedule_new_workflow, flight_booking_workflow,
                 input={"booking_id": request.booking_id, "request": request.request},
@@ -55,7 +57,8 @@ async def schedule(request: ScheduleRequest):
         state = await asyncio.to_thread(client.get_workflow_state, request.workflow_id, fetch_payloads=False)
         if state is None:
             raise
-    return {"workflow_id": request.workflow_id, "scheduled": True}
+        existed = True
+    return {"workflow_id": request.workflow_id, "scheduled": True, "already_existed": existed}
 
 
 @app.get("/internal/workflows/{workflow_id}")
