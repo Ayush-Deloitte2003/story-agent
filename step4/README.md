@@ -341,6 +341,22 @@ a GitHub Actions check that `/ui` loads. Not validated: layout, countdown behavi
 and real-browser interaction need a person to open the page; nothing was run on a
 local cluster.
 
+### Trying the UI without local Docker
+
+- **Screenshots from Actions (validated):** the `step4-ui-demo` workflow drives `/ui`
+  in headless Chromium on a Kind cluster (mock advisors, simulated data) and uploads
+  screenshots for 1 day. It runs only on `step4-ui-demo-*` tags or a push touching
+  `step4/ui-demo/**` or its workflow file. The simulated ops feed and poller are
+  enabled only there, by `step4/ui-demo/enable-simulation.sh`.
+- **GitHub Codespace (not validated):** `.devcontainer/devcontainer.json` and
+  `step4/scripts/codespace-up.sh` build Kind, Dapr and Step 4 with mock advisors and
+  apply the same overlay. The checked-in manifests keep simulation and the poller off.
+  Steps: create a Codespace on this branch, run `bash step4/scripts/codespace-up.sh`,
+  open the private forwarded port 8000 plus `/ui`, and for support questions call
+  port 8001 with the curl command the page shows. Delete the Codespace afterward.
+  The script has not been run by the authors; the pinned tool versions and the
+  Codespace itself are untested.
+
 ## Run and verify
 
 From the repository root, enter `step4\`, then use Python 3.12+:
