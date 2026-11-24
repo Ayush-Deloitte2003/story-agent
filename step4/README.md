@@ -361,7 +361,7 @@ local cluster.
 
 Booking and cancellation requests can also arrive as events instead of REST calls, so the
 booking, payment, fare and cancellation advisors run without anyone calling an endpoint. This
-is **off by default**: set `OPS_FEED_POLL_ENABLED=true` and `AMBIENT_FEEDS=booking,cancellation`
+is **off by default**: set `OPS_FEED_POLL_ENABLED=true` and `AMBIENT_FEEDS=booking,cancellation,support`
 on `flight-api` (the checked-in manifests set neither; CI and the Codespace/demo overlay do).
 
 - `POST /simulation/ambient` (needs `OPS_FEED_SIMULATION=true`, else 404) inserts a simulated event:
@@ -379,13 +379,22 @@ on `flight-api` (the checked-in manifests set neither; CI and the Codespace/demo
   corrected event.
 - `GET /ambient/status` shows enabled kinds, cursors and counters.
 
-Validated in the mock `step4-kind` run (CI only, never on a local cluster): unit and PostgreSQL tests
-(replay after a rewound cursor, concurrent pollers, quarantine, question and notify items), and the
-Kind check that seeded events start workflows once, stay human-gated and raise the items.
+- **Support (`kind: "support"`, payload `{booking_id, question}`).** The poller calls the read-only
+  `support-service` (`SUPPORT_SERVICE_URL`, default `http://support-service:8000/support/ask`, two
+  attempts, `SUPPORT_ASK_TIMEOUT_SECONDS`) and queues the answer as a **review** item: a draft that
+  is never sent to the customer. A failed call raises a **notify** item ("send it again"). This is a
+  bounded exception to the no-storage rule for support questions: the question is scrubbed from
+  `ambient_events` (set to `{}`) in the same transaction as the cursor, quarantine keeps no question,
+  and review items are deleted after `SUPPORT_REVIEW_RETENTION_MINUTES` (default 60). The draft text
+  (up to 500 characters) is kept until then. Scrubbing is best effort; the call is made inside the
+  poll transaction, so keep the timeout small.
 
-Not covered: the support advisor is still request-driven (`/support/ask`) because answering needs
-a stored question or draft, which the no-storage rule for support questions forbids without a new
-decision; the page has no ambient controls; no live-model or load testing.
+Validated in the mock `step4-kind` run (CI only, never on a local cluster): unit and PostgreSQL tests
+(replay after a rewound cursor, concurrent pollers, quarantine, question, notify, review, scrub and
+retention), and the Kind check that seeded events start workflows once, stay human-gated, raise the
+items, and that a support event yields a review draft without retaining the question.
+
+Not covered: the page has no ambient or attention controls; no live-model or load testing.
 
 ## Run and verify
 
