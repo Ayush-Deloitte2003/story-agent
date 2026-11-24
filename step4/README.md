@@ -111,6 +111,82 @@ flowchart LR
   DA -.->|live mode only| LLM
 ```
 
+## Pods, Dapr and agent sidecars
+
+A **pod** is the smallest unit Kubernetes runs: one or more containers that start and stop
+together and share a network (they reach each other on `localhost`). A **Deployment** keeps the
+wanted number of identical pods running and replaces any that die. Raising `replicas` scales a
+Deployment.
+
+At the checked-in defaults there are **8 pods** (counts from `k8s/apps.yaml`, `postgres.yaml`,
+`redis.yaml`):
+
+| Deployment | Pods | Containers per pod |
+| --- | --- | --- |
+| `flight-api` | 1 | `api` + Dapr sidecar (no agent) |
+| `booking-worker` | 2 | `worker` + `booking-advisor` + `payment-advisor` + `fare-advisor` + Dapr sidecar |
+| `cancellation-worker` | 1 | `worker` + `cancellation-advisor` + Dapr sidecar |
+| `disruption-worker` | 1 | `worker` + `flight-advisor` + Dapr sidecar |
+| `support-service` | 1 | `service` + `support-advisor` (no Dapr sidecar) |
+| `step4-postgres` | 1 | PostgreSQL (domain records) |
+| `step4-redis` | 1 | Redis (Dapr workflow state) |
+
+```mermaid
+flowchart LR
+  U[Browser /ui] --> API
+  subgraph API_POD["flight-api pod"]
+    API[api] --- D0[Dapr sidecar]
+  end
+  subgraph BW["booking-worker pods x2"]
+    BWK[worker] --- D1[Dapr sidecar]
+    BWK -->|localhost, read-only| A1[booking, payment, fare advisors]
+  end
+  subgraph CW["cancellation-worker pod"]
+    CWK[worker] --- D2[Dapr sidecar]
+    CWK -->|localhost, read-only| A2[cancellation advisor]
+  end
+  subgraph DW["disruption-worker pod"]
+    DWK[worker] --- D3[Dapr sidecar]
+    DWK -->|localhost, read-only| A3[flight advisor]
+  end
+  subgraph SP["support-service pod (no Dapr)"]
+    SS[service] -->|localhost, read-only| A4[support advisor]
+  end
+  API -->|domain records, dispatch| PG[(PostgreSQL)]
+  API -->|ambient support draft| SS
+  D0 & D1 & D2 & D3 -->|durable workflow history, timers| RD[(Redis)]
+  BWK & CWK & DWK -->|holds, payments, tickets| PG
+```
+
+Flow: the API records the request in PostgreSQL and a dispatcher starts the workflow in the
+matching worker through Dapr. The worker asks its advisor sidecar over `localhost` for a bounded
+recommendation, then waits for a human approval. Its Dapr sidecar saves every step to Redis.
+Business effects (hold, charge, refund, ticket) are written to PostgreSQL by the worker only.
+
+**Why Dapr makes it durable**
+- Dapr Workflow keeps an event-sourced history per workflow in Redis. After a crash, a new pod
+  replays the finished steps from history and continues at the first unfinished one.
+- Approval timeouts and seat-hold expiry are durable timers that survive restarts.
+- Steps may run more than once (at-least-once). Idempotency keys on the hold, charge and refund
+  keep the result correct, and rejection, timeout or failure runs idempotent compensation in
+  reverse order (refund, then release the seat).
+
+**Why it can scale**
+- Each Deployment scales on its own (for example `booking-worker` runs 2 replicas). State lives
+  in Redis and PostgreSQL, not in the pod, so replicas are interchangeable and any replica can
+  resume any workflow. PostgreSQL locks (`FOR UPDATE SKIP LOCKED`) stop pollers double-processing.
+- Redis and PostgreSQL are single pods here and would be the bottleneck; production needs HA and
+  sizing. Load and scale were **not tested**.
+
+**How each agent is a separate sidecar**
+- Six advisors run as their own containers in the pod of the service they advise, with their own
+  resource limits. The worker calls them on `localhost` with JSON in and JSON out.
+- They are read-only: they cannot charge, hold or issue tickets. Workflow hosts own those
+  decisions and a human approves. If an advisor fails or is slow, the workflow uses a
+  deterministic fallback.
+- They are mock by default; a live model is opt-in. `support-service` is deliberately outside
+  Dapr so a slow support call cannot affect booking.
+
 ## API contracts
 
 Create a booking with a caller-provided idempotency key:
