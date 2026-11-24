@@ -357,6 +357,36 @@ local cluster.
   The script has not been run by the authors; the pinned tool versions and the
   Codespace itself are untested.
 
+## Ambient intake (customer-channel events)
+
+Booking and cancellation requests can also arrive as events instead of REST calls, so the
+booking, payment, fare and cancellation advisors run without anyone calling an endpoint. This
+is **off by default**: set `OPS_FEED_POLL_ENABLED=true` and `AMBIENT_FEEDS=booking,cancellation`
+on `flight-api` (the checked-in manifests set neither; CI and the Codespace/demo overlay do).
+
+- `POST /simulation/ambient` (needs `OPS_FEED_SIMULATION=true`, else 404) inserts a simulated event:
+  `{"kind": "booking"|"cancellation", "source_event_id": "...", ...request fields}`. A repeat of the
+  same `kind` and `source_event_id` returns `duplicate`.
+- The poller (one cursor per kind, `FOR UPDATE SKIP LOCKED`, committed-transaction guard) creates the
+  same durable booking or cancellation and dispatch record as `POST /bookings` and
+  `POST /cancellations`. The idempotency key is derived from the event id, so a replay after a crash
+  creates nothing new. Delivery is at-least-once; effects are idempotent. Workflows, human approvals,
+  simulated payments and flights are unchanged; the poller never approves anything.
+- Invalid events are quarantined and raise a **notify** item. A booking event with no seat raises a
+  **question** item and creates no booking. `GET /attention` lists items and
+  `POST /attention/{id}/ack` acknowledges them. Items hold ids and fixed text, never event payloads
+  or passenger names. Acknowledging does not resume anything; the question is answered by sending a
+  corrected event.
+- `GET /ambient/status` shows enabled kinds, cursors and counters.
+
+Validated in the mock `step4-kind` run (CI only, never on a local cluster): unit and PostgreSQL tests
+(replay after a rewound cursor, concurrent pollers, quarantine, question and notify items), and the
+Kind check that seeded events start workflows once, stay human-gated and raise the items.
+
+Not covered: the support advisor is still request-driven (`/support/ask`) because answering needs
+a stored question or draft, which the no-storage rule for support questions forbids without a new
+decision; the page has no ambient controls; no live-model or load testing.
+
 ## Run and verify
 
 From the repository root, enter `step4\`, then use Python 3.12+:
