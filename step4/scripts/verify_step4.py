@@ -1,4 +1,5 @@
 import concurrent.futures
+import hashlib
 import json
 import os
 import subprocess
@@ -152,6 +153,48 @@ def verify_ambient_feed(confirmed):
         "Booking changed without human approval"
     assert items[0]["status"] == "pending"
     print("[PASS] Poller turned a feed row into a rebooking workflow; approval still required")
+
+
+def verify_ambient_intake():
+    """Customer-channel events must start the same human-gated workflows as REST, once."""
+    stamp = int(time.time())
+    event = {"kind": "booking", "source_event_id": f"verify-amb-book-{stamp}",
+             "flight_id": "SA201", "seat": "2A", "passenger_name": "Ambient Traveller"}
+    assert request("POST", "/simulation/ambient", event)[1]["status"] == "seeded"
+    assert request("POST", "/simulation/ambient", event)[1]["status"] == "duplicate"
+    key = f"ambient:booking:{event['source_event_id']}"
+    booking_id = "booking-" + hashlib.sha256(key.encode()).hexdigest()[:40]
+    await_inbox(booking_id)
+    await_status(booking_id, "awaiting_approval")
+    time.sleep(3)
+    assert len([i for i in request("GET", "/inbox")[1]["items"] if i["workflow_id"] == booking_id]) == 1
+    approve(booking_id)
+    await_status(booking_id, "confirmed")
+
+    cancel_event = {"kind": "cancellation", "source_event_id": f"verify-amb-cancel-{stamp}",
+                    "booking_id": booking_id}
+    assert request("POST", "/simulation/ambient", cancel_event)[1]["status"] == "seeded"
+    cancel_id = "cancellation-" + hashlib.sha256(
+        f"ambient:cancellation:{cancel_event['source_event_id']}".encode()).hexdigest()[:40]
+    item = eventually(lambda: inbox_item(cancel_id, "pending"), bool, "ambient cancellation approval")
+    assert item["kind"] == "cancellation"
+
+    no_seat = {"kind": "booking", "source_event_id": f"verify-amb-noseat-{stamp}",
+               "flight_id": "SA201", "passenger_name": "Ambient Traveller"}
+    request("POST", "/simulation/ambient", no_seat)
+    bad = {"kind": "cancellation", "source_event_id": f"verify-amb-bad-{stamp}", "booking_id": "nope"}
+    request("POST", "/simulation/ambient", bad)
+
+    def kinds():
+        return {i["kind"] for i in request("GET", "/attention")[1]["items"]
+                if no_seat["source_event_id"] in i["subject"] or bad["source_event_id"] in i["subject"]}
+    eventually(kinds, lambda value: value == {"question", "notify"}, "question and notify items")
+    status = request("GET", "/ambient/status")[1]
+    assert set(status["enabled_kinds"]) == {"booking", "cancellation"}, status
+    assert status["counters"]["booking"]["created"] >= 1, status
+    assert status["counters"]["cancellation"]["created"] >= 1, status
+    print("[PASS] Ambient booking and cancellation events start human-gated workflows once; "
+          "question and notify items raised")
 
 
 def confirmed_booking(key, flight, seat):
@@ -339,6 +382,7 @@ def main():
 
     verify_cancellations()
     verify_ambient_feed(winner)
+    verify_ambient_intake()
     print("ALL STEP 4 CHECKS PASSED")
 
 

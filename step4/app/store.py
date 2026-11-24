@@ -1,5 +1,6 @@
 import json
 import os
+from contextlib import nullcontext
 from datetime import timezone
 
 import psycopg
@@ -99,6 +100,16 @@ class PostgresStore:
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS one_issued_refund ON refunds(booking_id)
                     WHERE status = 'issued';
+                CREATE TABLE IF NOT EXISTS ambient_events (
+                    seq BIGSERIAL PRIMARY KEY, txid xid8 NOT NULL DEFAULT pg_current_xact_id(),
+                    kind TEXT NOT NULL, source_event_id TEXT NOT NULL, payload JSONB NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE (kind, source_event_id)
+                );
+                CREATE TABLE IF NOT EXISTS attention_items (
+                    attention_id TEXT PRIMARY KEY, kind TEXT NOT NULL, subject TEXT NOT NULL,
+                    summary TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(), acknowledged_at TIMESTAMPTZ
+                );
             """
             for statement in ddl.split(";"):
                 if statement.strip():
@@ -116,8 +127,9 @@ class PostgresStore:
         from app.inventory import FLIGHTS
         return FLIGHTS
 
-    def create_booking(self, workflow_id: str, idempotency_key: str, request: dict) -> tuple[dict, bool]:
-        with self._connect() as conn:
+    def create_booking(self, workflow_id: str, idempotency_key: str, request: dict,
+                       conn=None) -> tuple[dict, bool]:
+        with (self._connect() if conn is None else nullcontext(conn)) as conn:
             row = conn.execute(
                 """INSERT INTO bookings(booking_id, idempotency_key, request, status)
                    VALUES (%s, %s, %s, 'scheduled')
@@ -207,6 +219,36 @@ class PostgresStore:
                 (source_event_id, json.dumps(payload)),
             ).fetchone()
             return row is not None
+
+    def insert_ambient_event(self, kind: str, source_event_id: str, payload: dict) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                """INSERT INTO ambient_events(kind, source_event_id, payload) VALUES (%s, %s, %s)
+                   ON CONFLICT (kind, source_event_id) DO NOTHING RETURNING seq""",
+                (kind, source_event_id, json.dumps(payload))).fetchone()
+            return row is not None
+
+    @staticmethod
+    def _add_attention(conn, attention_id: str, kind: str, subject: str, summary: str) -> bool:
+        """Idempotent notify/question item; holds ids and fixed text only, never event payloads."""
+        row = conn.execute(
+            """INSERT INTO attention_items(attention_id, kind, subject, summary) VALUES (%s, %s, %s, %s)
+               ON CONFLICT (attention_id) DO NOTHING RETURNING attention_id""",
+            (attention_id, kind, subject[:200], summary[:300])).fetchone()
+        return row is not None
+
+    def attention_items(self) -> list[dict]:
+        with self._connect() as conn:
+            return conn.execute(
+                """SELECT attention_id, kind, subject, summary, status, created_at, acknowledged_at
+                   FROM attention_items ORDER BY created_at DESC, attention_id LIMIT 100""").fetchall()
+
+    def acknowledge_attention(self, attention_id: str) -> bool:
+        with self._connect() as conn:
+            return conn.execute(
+                """UPDATE attention_items SET status = 'acknowledged',
+                   acknowledged_at = COALESCE(acknowledged_at, now()) WHERE attention_id = %s""",
+                (attention_id,)).rowcount == 1
 
     def ensure_cursor(self, name: str, start_at_tail: bool = False) -> None:
         with self._connect() as conn:
@@ -557,14 +599,15 @@ class PostgresStore:
 
     # ---- cancellations and simulated refunds -------------------------------------------------
 
-    def create_cancellation(self, workflow_id: str, idempotency_key: str, request: dict) -> tuple[dict, bool]:
+    def create_cancellation(self, workflow_id: str, idempotency_key: str, request: dict,
+                            conn=None) -> tuple[dict, bool]:
         """Durably accept a cancellation with its dispatch intent.
 
         Raises LookupError for an unknown booking and ValueError for conflicts. The fare inputs are
         snapshotted here so a later catalog change cannot alter the computed refund.
         """
         from app.events import CANCELLATION_REQUESTED, REGISTRY
-        with self._connect() as conn:
+        with (self._connect() if conn is None else nullcontext(conn)) as conn:
             booking = conn.execute(
                 "SELECT status FROM bookings WHERE booking_id = %s FOR UPDATE", (request["booking_id"],)
             ).fetchone()

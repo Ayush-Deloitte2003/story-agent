@@ -13,7 +13,7 @@ from pathlib import Path
 from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 
-from app import dispatcher, feed_poller
+from app import ambient, dispatcher, feed_poller
 from app.contracts import (
     CANCELLATION_ONLY_FIELDS, BookingRequest, CancellationRequest, DecisionRequest, booking_payload,
     cancellation_payload,
@@ -54,6 +54,22 @@ def feed_polling_enabled() -> bool:
     return os.getenv("OPS_FEED_POLL_ENABLED", "false").lower() == "true"
 
 
+async def poll_ambient_forever(kind: str) -> None:
+    interval = float(os.getenv("OPS_FEED_POLL_INTERVAL_SECONDS", "5"))
+    batch_size = int(os.getenv("OPS_FEED_BATCH_SIZE", "20"))
+    await asyncio.to_thread(store.ensure_cursor, ambient.cursor_name(kind))
+    while True:
+        try:
+            await asyncio.to_thread(ambient.poll_pass, store, kind, batch_size, FAILURE_INJECTION_ENABLED)
+        except Exception:
+            pass  # already counted and logged by poll_pass
+        await asyncio.sleep(interval)
+
+
+def ambient_kinds() -> list[str]:
+    return ambient.enabled_kinds() if feed_polling_enabled() else []
+
+
 def feed_simulation_enabled() -> bool:
     return os.getenv("OPS_FEED_SIMULATION", "false").lower() == "true"
 
@@ -63,12 +79,15 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(store.initialize)
     reconciler = asyncio.create_task(reconcile_forever())
     poller = asyncio.create_task(poll_feed_forever()) if feed_polling_enabled() else None
+    ambient_tasks = [asyncio.create_task(poll_ambient_forever(kind)) for kind in ambient_kinds()]
     try:
         yield
     finally:
         reconciler.cancel()
         if poller:
             poller.cancel()
+        for task in ambient_tasks:
+            task.cancel()
 
 
 app = FastAPI(title="Flight booking API (simulated)", lifespan=lifespan)
@@ -250,6 +269,41 @@ def seed_feed_event(raw: dict = Body(...)):
 def feed_status():
     return {"enabled": feed_polling_enabled(), "cursor": store.cursor(feed_poller.CURSOR_NAME),
             "counters": feed_poller.counters.totals}
+
+
+@app.post("/simulation/ambient", status_code=202)
+def seed_ambient_event(raw: dict = Body(...)):
+    """Insert a simulated customer-channel event; disabled unless OPS_FEED_SIMULATION=true."""
+    if not feed_simulation_enabled():
+        raise HTTPException(404, "Not found")
+    kind, source_event_id = raw.get("kind"), raw.get("source_event_id")
+    if kind not in ambient.KINDS:
+        raise HTTPException(422, "kind must be booking or cancellation")
+    if (not isinstance(source_event_id, str) or not source_event_id.strip()
+            or len(source_event_id) > ambient.MAX_SOURCE_EVENT_ID):
+        raise HTTPException(422, "source_event_id must be a non-empty string up to 128 characters")
+    payload = {key: value for key, value in raw.items() if key not in ("kind", "source_event_id")}
+    created = store.insert_ambient_event(kind, source_event_id, payload)
+    return {"kind": kind, "source_event_id": source_event_id, "status": "seeded" if created else "duplicate"}
+
+
+@app.get("/ambient/status")
+def ambient_status():
+    return {"enabled_kinds": ambient_kinds(),
+            "cursors": {kind: store.cursor(ambient.cursor_name(kind)) for kind in ambient.KINDS},
+            "counters": ambient.counters.by_kind}
+
+
+@app.get("/attention")
+def attention():
+    return {"items": store.attention_items()}
+
+
+@app.post("/attention/{attention_id}/ack")
+def acknowledge_attention(attention_id: str):
+    if not store.acknowledge_attention(attention_id):
+        raise HTTPException(404, "Attention item not found")
+    return {"attention_id": attention_id, "status": "acknowledged"}
 
 
 @app.post("/disruptions", status_code=202)
