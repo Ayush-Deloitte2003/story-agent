@@ -190,11 +190,23 @@ def verify_ambient_intake():
                 if no_seat["source_event_id"] in i["subject"] or bad["source_event_id"] in i["subject"]}
     eventually(kinds, lambda value: value == {"question", "notify"}, "question and notify items")
     status = request("GET", "/ambient/status")[1]
-    assert set(status["enabled_kinds"]) == {"booking", "cancellation"}, status
+    assert set(status["enabled_kinds"]) == {"booking", "cancellation", "support"}, status
     assert status["counters"]["booking"]["created"] >= 1, status
     assert status["counters"]["cancellation"]["created"] >= 1, status
     print("[PASS] Ambient booking and cancellation events start human-gated workflows once; "
           "question and notify items raised")
+
+    marker = "verify-support-question-marker"
+    support = {"kind": "support", "source_event_id": f"verify-amb-support-{stamp}",
+               "booking_id": booking_id, "question": f"Can I cancel? {marker}"}
+    assert request("POST", "/simulation/ambient", support)[1]["status"] == "seeded"
+
+    def reviews():
+        return [i for i in request("GET", "/attention")[1]["items"]
+                if support["source_event_id"] in i["subject"] and i["kind"] == "review"]
+    eventually(reviews, bool, "support review draft")
+    assert marker not in json.dumps(request("GET", "/attention")[1]), "question must not be retained"
+    print("[PASS] Ambient support event produced a human-review draft; question text not retained")
 
 
 def confirmed_booking(key, flight, seat):

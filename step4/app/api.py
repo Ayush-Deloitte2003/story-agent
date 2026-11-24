@@ -278,7 +278,7 @@ def seed_ambient_event(raw: dict = Body(...)):
         raise HTTPException(404, "Not found")
     kind, source_event_id = raw.get("kind"), raw.get("source_event_id")
     if kind not in ambient.KINDS:
-        raise HTTPException(422, "kind must be booking or cancellation")
+        raise HTTPException(422, "kind must be booking, cancellation or support")
     if (not isinstance(source_event_id, str) or not source_event_id.strip()
             or len(source_event_id) > ambient.MAX_SOURCE_EVENT_ID):
         raise HTTPException(422, "source_event_id must be a non-empty string up to 128 characters")

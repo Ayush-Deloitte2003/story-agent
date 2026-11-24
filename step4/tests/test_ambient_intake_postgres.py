@@ -122,6 +122,55 @@ class AmbientIntakePostgresTests(unittest.TestCase):
         self.assertEqual(self.count("SELECT count(*) AS n FROM approval_inbox WHERE booking_id = %s",
                                     booking_id), 0)  # the poller never approves anything
 
+    def test_support_question_becomes_review_draft_and_is_scrubbed(self):
+        question = "Is my seat refundable? secret-question-marker"
+        event_id = self.seed("support", {"booking_id": "booking-x", "question": question})
+        asked = []
+
+        def answer(body):
+            asked.append(body)
+            return {"answer_draft": "Cancellation is possible; a human must approve.",
+                    "suggested_action": "request_cancellation"}
+        stats = ambient.run_once(self.store, "support", answer=answer)
+        self.assertEqual((stats.reviews, stats.answer_failures), (1, 0))
+        self.assertEqual(asked, [{"booking_id": "booking-x", "question": question}])
+        items = [i for i in self.store.attention_items() if event_id[:40] in i["subject"]]
+        self.assertEqual([i["kind"] for i in items], ["review"])
+        self.assertNotIn("secret-question-marker", items[0]["summary"] + items[0]["subject"])
+        self.assertEqual(self.count("SELECT count(*) AS n FROM ambient_events WHERE source_event_id = %s "
+                                    "AND payload::text LIKE '%%secret-question-marker%%'", event_id), 0)
+        self.assertEqual(ambient.run_once(self.store, "support", answer=answer).polled, 0)
+        self.assertEqual(len(asked), 1)
+
+    def test_support_failure_raises_notify_and_scrubs_question(self):
+        event_id = self.seed("support", {"booking_id": "missing", "question": "secret-question-marker"})
+
+        def broken(_body):
+            raise RuntimeError("support service down")
+        stats = ambient.run_once(self.store, "support", answer=broken)
+        self.assertEqual((stats.reviews, stats.answer_failures), (0, 1))
+        items = [i for i in self.store.attention_items() if event_id[:40] in i["subject"]]
+        self.assertEqual([i["kind"] for i in items], ["notify"])
+        self.assertEqual(self.count("SELECT count(*) AS n FROM ambient_events WHERE source_event_id = %s "
+                                    "AND payload::text LIKE '%%secret-question-marker%%'", event_id), 0)
+
+    def test_invalid_support_event_quarantine_keeps_no_question(self):
+        event_id = self.seed("support", {"booking_id": "b", "question": "secret-question-marker", "x": 1})
+        self.assertEqual(ambient.run_once(self.store, "support", answer=lambda _b: {}).quarantined, 1)
+        with self.store._connect() as conn:
+            raw = conn.execute("SELECT raw::text AS t FROM quarantined_events WHERE event_id = %s",
+                               (event_id,)).fetchone()["t"]
+        self.assertNotIn("secret-question-marker", raw)
+
+    def test_review_items_are_purged_after_retention(self):
+        event_id = self.seed("support", {"booking_id": "b", "question": "q"})
+        ambient.run_once(self.store, "support", answer=lambda _b: {"answer_draft": "ok"})
+        with self.store._connect() as conn:
+            conn.execute("UPDATE attention_items SET created_at = now() - interval '2 hours' "
+                         "WHERE subject LIKE %s", (f"%{event_id[:40]}%",))
+        ambient.run_once(self.store, "support", answer=lambda _b: {})
+        self.assertEqual([i for i in self.store.attention_items() if event_id[:40] in i["subject"]], [])
+
     def test_duplicate_source_event_id_is_not_inserted_twice(self):
         event_id = self.seed("booking", self.booking_event())
         self.assertFalse(self.store.insert_ambient_event("booking", event_id, self.booking_event()))

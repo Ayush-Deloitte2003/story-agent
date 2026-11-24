@@ -4,4 +4,4 @@
 set -euo pipefail
 kubectl set env deployment/flight-api \
   OPS_FEED_SIMULATION=true OPS_FEED_POLL_ENABLED=true OPS_FEED_POLL_INTERVAL_SECONDS=1 \
-  AMBIENT_FEEDS=booking,cancellation
+  AMBIENT_FEEDS=booking,cancellation,support

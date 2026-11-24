@@ -234,8 +234,15 @@ class PostgresStore:
         row = conn.execute(
             """INSERT INTO attention_items(attention_id, kind, subject, summary) VALUES (%s, %s, %s, %s)
                ON CONFLICT (attention_id) DO NOTHING RETURNING attention_id""",
-            (attention_id, kind, subject[:200], summary[:300])).fetchone()
+            (attention_id, kind, subject[:200], summary[:700])).fetchone()
         return row is not None
+
+    @staticmethod
+    def purge_reviews(conn, retention_minutes: int) -> int:
+        """Short retention for support review drafts (and their unanswered notices)."""
+        return conn.execute(
+            """DELETE FROM attention_items WHERE subject LIKE 'support %%'
+               AND created_at < now() - make_interval(mins => %s)""", (retention_minutes,)).rowcount
 
     def attention_items(self) -> list[dict]:
         with self._connect() as conn:

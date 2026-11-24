@@ -42,6 +42,14 @@ class AmbientParseTests(unittest.TestCase):
         body = {"flight_id": "SA101", "seat": "1A", "passenger_name": "X", "failure_at": "payment"}
         self.assertIsInstance(ambient.parse("booking", "e", body, True), ambient.Plan)
 
+    def test_support_event_parses_and_rejects_bad_payloads(self):
+        ok = ambient.parse("support", "s1", {"booking_id": "booking-1", "question": "Can I cancel?"}, False)
+        self.assertEqual(ok, ambient.SupportPlan("booking-1", "Can I cancel?"))
+        for payload in ({"booking_id": "b"}, {"booking_id": "b", "question": "q", "extra": 1},
+                        {"booking_id": "b", "question": "x" * 501}):
+            with self.subTest(payload=payload):
+                self.assertIsInstance(ambient.parse("support", "s1", payload, False), Quarantined)
+
     def test_cancellation_event_yields_plan(self):
         outcome = ambient.parse("cancellation", "evt-9", {"booking_id": "booking-abc"}, False)
         self.assertIsInstance(outcome, ambient.Plan)
